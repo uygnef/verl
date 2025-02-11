@@ -19,7 +19,7 @@ The input is a parquet file that contains N generated sequences and (optional) t
 
 import hydra
 from verl.utils.fs import copy_local_path_from_hdfs
-from verl.utils.reward_score import math, gsm8k
+from verl.utils.reward_score import math, gsm8k, kk
 import pandas as pd
 import numpy as np
 
@@ -27,6 +27,8 @@ import numpy as np
 def select_reward_fn(data_source):
     if data_source == 'lighteval/MATH':
         return math.compute_score
+    if 'kk' in data_source:
+        return kk.compute_score
     else:
         raise NotImplementedError
 
@@ -58,8 +60,8 @@ def main(config):
             score_lst.append(score)
 
         max_score = np.max(score_lst)
-
-        if max_score == 1:
+        # TODO: adpt logic rl
+        if max_score == 3:
             passes += 1
 
     print(f'pass@5: {passes / total}')

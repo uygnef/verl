@@ -106,9 +106,11 @@ class RLHFDataset(Dataset):
         # filter out too long prompts
         tokenizer = self.tokenizer
         prompt_key = self.prompt_key
-        self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(
-            tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
-                                                             axis=1)]
+
+        # nvm if prompt is too long
+        # self.dataframe = self.dataframe[self.dataframe.apply(lambda doc: len(
+        #     tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+        #                                                      axis=1)]
 
         print(f'filter dataset len: {len(self.dataframe)}')
 
@@ -123,7 +125,8 @@ class RLHFDataset(Dataset):
 
         chat = row_dict.pop(self.prompt_key)
 
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(chat, add_generation_prompt=True, tokenize=False)
+        prompt_with_chat_template = chat[0]['content']
+        # prompt_with_chat_template = chat
 
         input_ids, attention_mask = verl_F.tokenize_and_postprocess_data(prompt=prompt_with_chat_template,
                                                                          tokenizer=self.tokenizer,
@@ -141,5 +144,9 @@ class RLHFDataset(Dataset):
         # encode prompts without chat template
         if self.return_raw_chat:
             row_dict['raw_prompt'] = chat.tolist()
+
+        # add index for each prompt
+        index = row_dict.get("extra_info", {}).get("index", 0)
+        row_dict["index"] = index
 
         return row_dict

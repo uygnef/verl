@@ -17,6 +17,8 @@ on:
       - .github/workflows/e2e_gsm8k.yml
       - "tests/e2e/*.sh"
 
+
+
 jobs:
   e2e_gsm8k:
     runs-on: [self-hosted, l20-1]
@@ -44,6 +46,10 @@ jobs:
         run: |
           ray stop --force
           bash tests/e2e/run_qwen_gsm8k_function_rm.sh
+      - name: Running gsm8k e2e training tests on 8 L20 GPUs with rmpad using function rm (GRPO)
+        run: |
+          ray stop --force
+          bash tests/e2e/run_qwen_gsm8k_function_rm_grpo.sh
       - name: Running gsm8k e2e without rmpad using function rm
         run: |
           ray stop --force
@@ -64,3 +70,7 @@ jobs:
         run: |
           ray stop --force
           bash tests/e2e/run_qwen_gsm8k_model_rm_seq_balance.sh
+      - name: Running gsm8k e2e with rmpad using model rm with Liger Kernel enabled
+        run: |
+          ray stop --force
+          bash tests/e2e/run_qwen_gsm8k_model_rm_liger_kernel.sh

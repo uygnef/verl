@@ -60,9 +60,13 @@ def main(config):
             score_lst.append(score)
 
         max_score = np.max(score_lst)
-        # TODO: adpt logic rl
-        if max_score == 3:
-            passes += 1
+
+        if 'kk' in data_source:
+            if max_score == 3:
+                passes += 1
+        else:
+            if max_score == 1:
+                passes += 1
 
     print(f'pass@5: {passes / total}')
 

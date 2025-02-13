@@ -66,7 +66,7 @@ class ResourcePoolManager:
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
-            # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for differnt models
+            # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for different models
             resource_pool = RayResourcePool(process_on_nodes=process_on_nodes,
                                             use_gpu=True,
                                             max_colocate_count=1,
@@ -463,8 +463,8 @@ class RayPPOTrainer(object):
         from verl.utils.dataset.rl_dataset import collate_fn
 
         module = importlib.import_module("verl.utils.dataset.rl_dataset")
-        customDataset = getattr(module, self.config.data.dataset)
-        self.train_dataset = customDataset(parquet_files=self.config.data.train_files,
+        CustomDataset = getattr(module, self.config.data.dataset)
+        self.train_dataset = CustomDataset(parquet_files=self.config.data.train_files,
                                          tokenizer=self.tokenizer,
                                          prompt_key=self.config.data.prompt_key,
                                          max_prompt_length=self.config.data.max_prompt_length,
@@ -477,7 +477,7 @@ class RayPPOTrainer(object):
                                            drop_last=True,
                                            collate_fn=collate_fn)
 
-        self.val_dataset = customDataset(parquet_files=self.config.data.val_files,
+        self.val_dataset = CustomDataset(parquet_files=self.config.data.val_files,
                                        tokenizer=self.tokenizer,
                                        prompt_key=self.config.data.prompt_key,
                                        max_prompt_length=self.config.data.max_prompt_length,
@@ -559,8 +559,12 @@ class RayPPOTrainer(object):
         metric_dict = {}
         for data_source, rewards in data_source_reward.items():
             # TODO: support custom reward metric
-            metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
-
+            if data_source == 'kk_logic':
+                count_equal_3 = sum(1 for reward in rewards if reward == 3)
+                total_count = len(rewards)
+                metric_dict[f'val/test_score/{data_source}'] = count_equal_3 / total_count if total_count > 0 else 0
+            else:
+                metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
         return metric_dict
 
     def init_workers(self):
@@ -801,8 +805,10 @@ class RayPPOTrainer(object):
                 self.global_steps += 1
 
                 if self.global_steps >= self.total_training_steps:
-
-                    # perform validation after training
+                    # 在所有训练步骤结束时保存最后一个检查点
+                    with _timer('save_checkpoint', timing_raw):
+                        self._save_checkpoint()
+                    # 执行验证
                     if self.val_reward_fn is not None:
                         val_metrics = self._validate()
                         pprint(f'Final validation metrics: {val_metrics}')

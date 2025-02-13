@@ -1,5 +1,9 @@
 <h1 style="text-align: center;">verl: Volcano Engine Reinforcement Learning for LLM</h1>
 
+## RL训练框架 FAQ
+https://cooper.didichuxing.com/docs2/document/2203852754542
+
+## verl README
 verl is a flexible, efficient and production-ready RL training library for large language models (LLMs).
 
 verl is the open-source version of **[HybridFlow: A Flexible and Efficient RLHF Framework](https://arxiv.org/abs/2409.19256v2)** paper.

@@ -22,6 +22,8 @@ import warnings
 import torch
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
+from transformers import AutoModelForCausalLM
+
 import verl.utils.hdfs_io as hdfs_io
 import verl.utils.torch_functional as verl_F
 from omegaconf import DictConfig, open_dict
@@ -915,7 +917,7 @@ class RewardModelWorker(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             setattr(model_config, 'classifier_dropout', 0.)
-            reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+            reward_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             config=model_config,
                                                                             torch_dtype=torch.bfloat16,
                                                                             attn_implementation='flash_attention_2',
@@ -973,11 +975,17 @@ class RewardModelWorker(Worker):
                                                                                                 sp_size=self.ulysses_sequence_parallel_size)
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
+                # output = self.reward_module(input_ids=input_ids_rmpad,
+                #                             attention_mask=None,
+                #                             position_ids=position_ids_rmpad,
+                #                             use_cache=False)  # prevent model thinks we are generating
                 output = self.reward_module(input_ids=input_ids_rmpad,
                                             attention_mask=None,
-                                            position_ids=position_ids_rmpad,
-                                            use_cache=False)  # prevent model thinks we are generating
-                reward_rmpad = output.logits
+                                            position_ids=position_ids_rmpad)  # prevent model thinks we are generating
+                print(f"output, {output}")
+                reward_rmpad = output.logits[:, -1:, :]
+                print(f"logits, {reward_rmpad}, logits shape {reward_rmpad.shape}")
+
                 reward_rmpad = reward_rmpad.squeeze(0)  # (total_nnz)
 
                 # gather output if sp > 1
@@ -1013,7 +1021,10 @@ class RewardModelWorker(Worker):
 
         # select the response part
         token_level_scores = token_level_scores[:, -response_length:]
+        print(f"token_level_scores: {token_level_scores}, shape {token_level_scores.shape}")
+        print(f"scores: {scores}, shape {scores.shape}")
 
+        exit(1)
         return token_level_scores
 
     def _switch_chat_template(self, data: DataProto):

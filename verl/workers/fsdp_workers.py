@@ -22,8 +22,6 @@ import warnings
 import torch
 import torch.distributed
 from torch.distributed.device_mesh import init_device_mesh
-from transformers import AutoModelForCausalLM
-
 import verl.utils.hdfs_io as hdfs_io
 import verl.utils.torch_functional as verl_F
 from omegaconf import DictConfig, open_dict
@@ -867,15 +865,17 @@ class RewardModelWorker(Worker):
         self.ulysses_device_mesh = None
         self.ulysses_sequence_parallel_size = self.config.get('ulysses_sequence_parallel_size', 1)
         dp = world_size // self.ulysses_sequence_parallel_size
-        assert  self.ulysses_sequence_parallel_size == 1, "ulysses_sequence_parallel_size does not support custom reward model"
-        # if self.ulysses_sequence_parallel_size > 1:
-        #     self.ulysses_device_mesh = init_device_mesh('cuda',
-        #                                                 mesh_shape=(dp, self.ulysses_sequence_parallel_size),
-        #                                                 mesh_dim_names=['dp', 'sp'])
+        if self.ulysses_sequence_parallel_size > 1:
+            self.ulysses_device_mesh = init_device_mesh('cuda',
+                                                        mesh_shape=(dp, self.ulysses_sequence_parallel_size),
+                                                        mesh_dim_names=['dp', 'sp'])
+
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.use_remove_padding = self.config.model.get('use_remove_padding', False)
-        assert self.use_remove_padding == True, "use_remove_padding should be false for custom reward model"
+        from transformers import AutoModelForTokenClassification
+        self.load_method = AutoModelForTokenClassification
+
         # normalize config
         if self.config.micro_batch_size is not None:
             self.config.micro_batch_size //= torch.distributed.get_world_size()
@@ -883,7 +883,7 @@ class RewardModelWorker(Worker):
 
     def _build_model(self, config):
         # the following line is necessary
-        from transformers import AutoModelForTokenClassification, AutoConfig
+        from transformers import AutoConfig
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, CPUOffload
 
         # download the checkpoint from hdfs
@@ -917,7 +917,7 @@ class RewardModelWorker(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             setattr(model_config, 'classifier_dropout', 0.)
-            reward_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
+            reward_module = self.load_method.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             config=model_config,
                                                                             torch_dtype=torch.bfloat16,
                                                                             attn_implementation='flash_attention_2',
@@ -951,6 +951,7 @@ class RewardModelWorker(Worker):
 
     def _forward_micro_batch(self, micro_batch):
         from flash_attn.bert_padding import pad_input, unpad_input, index_first_axis, rearrange
+        from verl.utils.ulysses import ulysses_pad_and_slice_inputs, gather_outpus_and_unpad
 
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             input_ids = micro_batch['input_ids']
@@ -958,37 +959,49 @@ class RewardModelWorker(Worker):
             attention_mask = micro_batch['attention_mask']
             position_ids = micro_batch['position_ids']
 
-            input_ids_rmpad, indices, cu_seqlens, _ = unpad_input(input_ids.unsqueeze(-1),
-                                                       attention_mask)  # input_ids_rmpad (total_nnz, ...)
-            input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+            if self.use_remove_padding:
+                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1),
+                                                           attention_mask)  # input_ids_rmpad (total_nnz, ...)
+                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
-            # unpad the position_ids to align the rotary
-            position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
-                                                  indices).transpose(0, 1)
+                # unpad the position_ids to align the rotary
+                position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."),
+                                                      indices).transpose(0, 1)
 
-            # pad and slice the inputs if sp > 1
-            if self.ulysses_sequence_parallel_size > 1:
-                raise NotImplementedError("Does not support ulysses_sequence_parallel_size")
+                # pad and slice the inputs if sp > 1
+                if self.ulysses_sequence_parallel_size > 1:
+                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(input_ids_rmpad, \
+                                                                                                position_ids_rmpad, \
+                                                                                                sp_size=self.ulysses_sequence_parallel_size)
 
+                # only pass input_ids and position_ids to enable flash_attn_varlen
+                output = self.reward_module(input_ids=input_ids_rmpad,
+                                            attention_mask=None,
+                                            position_ids=position_ids_rmpad,
+                                            use_cache=False)  # prevent model thinks we are generating
+                reward_rmpad = output.logits
+                reward_rmpad = reward_rmpad.squeeze(0)  # (total_nnz)
 
-            # only pass input_ids and position_ids to enable flash_attn_varlen
-            last_token_indices = [cu_seqlens[i+1] - 1 for i in range(len(cu_seqlens) - 1)]
+                # gather output if sp > 1
+                if self.ulysses_sequence_parallel_size > 1:
+                    reward_rmpad = gather_outpus_and_unpad(reward_rmpad,
+                                                           gather_dim=0,
+                                                           unpad_dim=0,
+                                                           padding_size=pad_size)
 
-            output = self.reward_module(input_ids=input_ids_rmpad,
-                                        attention_mask=None,
-                                        position_ids=position_ids_rmpad)  # prevent model thinks we are generating
-            reward_rmpad = output.logits[:, last_token_indices, :]
-            reward_rmpad = self._make_reward_score(reward_rmpad)
+                # pad it back
+                rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
+            else:
+                output = self.reward_module(input_ids=input_ids,
+                                            attention_mask=attention_mask,
+                                            position_ids=position_ids)
+                rm_score = output.logits  # (batch_size, seq_len, 1)
+                rm_score = rm_score.squeeze(-1)
 
             # extract the result of the last valid token
-            return reward_rmpad
-
-    def _make_reward_score(self, logits):
-        index = [14004, 8996]
-        reward = torch.softmax(logits[:, :, index], dim=-1)
-        reward = torch.where(reward[:,:, 0] > 0.9, 1., 0.).squeeze(0)
-
-        return reward
+            eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
+            rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
+            return rm_score
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
         batch_size = data.batch.batch_size[0]
@@ -1002,6 +1015,7 @@ class RewardModelWorker(Worker):
 
         # select the response part
         token_level_scores = token_level_scores[:, -response_length:]
+
         return token_level_scores
 
     def _switch_chat_template(self, data: DataProto):
@@ -1068,8 +1082,7 @@ class RewardModelWorker(Worker):
         data = data.to('cuda')
         if self._do_switch_chat_template:
             rm_data = self._switch_chat_template(data)
-        else:
-            rm_data = data
+
         rm_data.batch = rm_data.batch.cuda()
 
         # perform forward computation

@@ -2,7 +2,7 @@ set -x
 
 export VLLM_ATTENTION_BACKEND=XFORMERS
 MODEL_PATH=/nfs/ofs-llm-ssd/models/Qwen2.5-0.5B
-
+export HYDRA_FULL_ERROR=1
 python3 -m verl.trainer.main_ppo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
@@ -36,7 +36,8 @@ python3 -m verl.trainer.main_ppo \
     critic.model.fsdp_config.grad_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
     reward_model.enable=True \
-    reward_model.model.path=$MODEL_PATH\
+    +reward_model.name=openmath\
+    reward_model.model.path=/nfs/ofs-llm-ssd/models/Qwen2.5-72B-Instruct\
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=True \
     reward_model.micro_batch_size_per_gpu=16 \

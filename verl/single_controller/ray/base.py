@@ -429,7 +429,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
         if worker_cls == None:
             worker_cls = cls.cls.__ray_actor_class__.__base__
         else:
-            assert worker_cls == cls.cls.__ray_actor_class__.__base__, \
+            assert issubclass(cls.cls.__ray_actor_class__.__base__, worker_cls), \
                 'the worker class should be the same when share the same process'
         cls_dict[key] = cls.cls
         init_args_dict[key] = {'args': cls.args, 'kwargs': cls.kwargs}

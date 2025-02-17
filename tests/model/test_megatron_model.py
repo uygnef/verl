@@ -16,7 +16,7 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.test_utilities import Utils
 import torch.nn as nn
-from model_zoo.reward_model.openmathReward import OpenmathRewardModel
+from model_zoo.reward_model.openmath import OpenmathRewardModel
 from verl import DataProto
 
 

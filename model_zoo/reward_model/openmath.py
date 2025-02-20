@@ -26,7 +26,7 @@ class CustomRewardModelWorker(RewardModelWorker):
             attention_mask = micro_batch['attention_mask']
             position_ids = micro_batch['position_ids']
 
-            input_ids_rmpad, indices, cu_seqlens, _ = unpad_input(input_ids.unsqueeze(-1),
+            input_ids_rmpad, indices, cu_seqlens, *_ = unpad_input(input_ids.unsqueeze(-1),
                                                        attention_mask)  # input_ids_rmpad (total_nnz, ...)
             input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 

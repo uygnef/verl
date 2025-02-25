@@ -1,11 +1,11 @@
 set -x
-
+export PYTHONPATH=$PYTHONPATH:/home/luban/Megatron-LM
 export VLLM_ATTENTION_BACKEND=XFORMERS
 MODEL_PATH=/nfs/ofs-llm-ssd/models/Qwen2.5-0.5B
 export HYDRA_FULL_ERROR=1
 python3 -m verl.trainer.main_ppo \
-    data.train_files=$HOME/data/gsm8k/train.parquet \
-    data.val_files=$HOME/data/gsm8k/test.parquet \
+    data.train_files=data/gsm8k/train.parquet \
+    data.val_files=data/gsm8k/test.parquet \
     data.train_batch_size=1024 \
     data.val_batch_size=1312 \
     data.max_prompt_length=512 \
@@ -37,7 +37,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.fsdp_config.optimizer_offload=False \
     reward_model.enable=True \
     +reward_model.name=openmath\
-    reward_model.model.path=/nfs/ofs-llm-ssd/models/Qwen2.5-72B-Instruct\
+    reward_model.model.path=$MODEL_PATH\
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=True \
     reward_model.micro_batch_size_per_gpu=16 \
@@ -47,7 +47,7 @@ python3 -m verl.trainer.main_ppo \
     +trainer.val_before_train=False \
     trainer.project_name='verl_example' \
     trainer.experiment_name='Qwen2.5-0.5B-ci_hybrid_rm' \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.total_training_steps=1 $@

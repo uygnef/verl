@@ -23,9 +23,9 @@ from transformers import AutoTokenizer
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.utils.fs import copy_local_path_from_hdfs
 
-MODEL_PATH = 'Qwen/Qwen2.5-0.5B'
+MODEL_PATH = '/nfs/ofs-llm-ssd/models/Meta-Llama-3.1-8B-Instruct'
 DATA_PATH = 'data/gsm8k/'
-SAVE_PATH = '/tmp/checkpoint'
+SAVE_PATH = '/tmp-data/checkpoint'
 def make_reward_function(tokenizer, num_examine):
     return None
 

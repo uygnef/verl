@@ -46,3 +46,13 @@ def import_external_libs(external_libs=None):
     import importlib
     for external_lib in external_libs:
         importlib.import_module(external_lib)
+
+def load_custom_models(model_type, model_name):
+    import importlib
+    import os
+    module_path = os.path.abspath(os.path.join(os.path.dirname(__file__), f'../../model_zoo/{model_type}',
+                                               f"{model_name}.py"))
+    spec = importlib.util.spec_from_file_location(model_type, module_path)
+    custom_model = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(custom_model)
+    return custom_model

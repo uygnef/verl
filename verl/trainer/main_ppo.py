@@ -91,7 +91,13 @@ def main_task(config, compute_score=None):
     # - The reward type depends on the tag of the data
     if config.reward_model.enable:
         if config.reward_model.strategy == 'fsdp':
-            from verl.workers.fsdp_workers import RewardModelWorker
+            if config.reward_model.name == 'RewardModelWorker':
+                from verl.workers.fsdp_workers import RewardModelWorker
+            else:
+                from verl.utils.import_utils import load_custom_models
+                reward_module = load_custom_models('reward_model', config.reward_model.name)
+                RewardModelWorker = reward_module.CustomRewardModelWorker
+
         elif config.reward_model.strategy == 'megatron':
             from verl.workers.megatron_workers import RewardModelWorker
         else:

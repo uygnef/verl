@@ -873,6 +873,8 @@ class RewardModelWorker(Worker):
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.use_remove_padding = self.config.model.get('use_remove_padding', False)
+        from transformers import AutoModelForTokenClassification
+        self.load_method = AutoModelForTokenClassification
 
         # normalize config
         if self.config.micro_batch_size is not None:
@@ -881,7 +883,7 @@ class RewardModelWorker(Worker):
 
     def _build_model(self, config):
         # the following line is necessary
-        from transformers import AutoModelForTokenClassification, AutoConfig
+        from transformers import AutoConfig
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, CPUOffload
 
         # download the checkpoint from hdfs
@@ -915,7 +917,7 @@ class RewardModelWorker(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             setattr(model_config, 'classifier_dropout', 0.)
-            reward_module = AutoModelForTokenClassification.from_pretrained(pretrained_model_name_or_path=local_path,
+            reward_module = self.load_method.from_pretrained(pretrained_model_name_or_path=local_path,
                                                                             config=model_config,
                                                                             torch_dtype=torch.bfloat16,
                                                                             attn_implementation='flash_attention_2',

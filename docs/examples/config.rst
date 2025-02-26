@@ -19,7 +19,6 @@ Data
      max_prompt_length: 512
      max_response_length: 512
      train_batch_size: 1024
-     val_batch_size: 1312
      return_raw_input_ids: False  # This should be set to true when the tokenizer between policy and rm differs
      return_raw_chat: False
 
@@ -39,8 +38,6 @@ Data
   algorithms (e.g. PPO) generates up to this length
 - ``data.train_batch_size``: Batch size sampled for one training
   iteration of different RL algorithms.
-- ``data.val_batch_size``: Batch size sampled for one validation
-  iteration.
 - ``data.return_raw_input_ids``: Whether to return the original
   input_ids without adding chat template. This is mainly used to
   accommodate situations where the reward model's chat template differs
@@ -93,7 +90,6 @@ Actor/Rollout/Reference Policy
           # transformer_layer_cls_to_wrap: None
           min_num_params: 0
         param_offload: False
-        grad_offload: False
         optimizer_offload: False
         fsdp_size: -1
     ref:
@@ -131,7 +127,7 @@ Actor/Rollout/Reference Policy
       # for hf rollout
       do_sample: True
       # number of responses (i.e. num sample times)
-      n: 1 # > 1 for grpo
+      n: 1 # > 1 for grpo, rloo
 
 **Common config for actor, rollout and reference model**
 
@@ -292,6 +288,7 @@ Reward Model
          param_offload: False
      micro_batch_size_per_gpu: 16
      max_length: null
+     reward_manager: naive
 
 - ``reward_model.enable``: Whether to enable reward model. If False, we
   compute the reward only with the user-defined reward functions. In
@@ -307,6 +304,10 @@ Reward Model
   - ``path``: RM's HDFS path or local path. Note that RM only supports
     AutoModelForSequenceClassification. Other model types need to define
     their own RewardModelWorker and pass it from the code.
+- ``reward_model.reward_manager``:  Reward Manager. This defines the mechanism
+  of computing rule-based reward and handling different reward sources. Default
+  if ``naive``. If all verification functions are multiprocessing-safe, the reward
+  manager can be set to ``prime`` for parallel verification.
 
 Algorithm
 ~~~~~~~~~
@@ -324,9 +325,8 @@ Algorithm
 
 - ``gemma``: discount factor
 - ``lam``: Trade-off between bias and variance in the GAE estimator
-- ``adv_estimator``: gae. Currently only supports gae, will support GRPO
-  in the future
-- ``kl_penalty``\ ：Support ``kl``, ``abs``, ``mse`` and ``full``.How to
+- ``adv_estimator``: Support ``gae``, ``grpo``, ``reinforce_plus_plus``, ``rloo``
+- ``kl_penalty``: Support ``kl``, ``abs``, ``mse`` and ``full``. How to
   calculate the kl divergence between actor and reference policy. For
   specific options, refer to `core_algos.py <https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py#L192>`_ .
 

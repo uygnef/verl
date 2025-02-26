@@ -11,7 +11,6 @@ python3 tests/e2e/arithmetic_sequence/rl/main_trainer.py \
     data.train_files=tests/e2e/arithmetic_sequence/data/train.parquet \
     data.val_files=tests/e2e/arithmetic_sequence/data/test.parquet \
     data.train_batch_size=800 \
-    data.val_batch_size=200 \
     data.max_prompt_length=16 \
     data.max_response_length=32 \
     data.return_raw_input_ids=True \
@@ -32,7 +31,8 @@ python3 tests/e2e/arithmetic_sequence/rl/main_trainer.py \
     trainer.experiment_name=arithmetic_sequences \
     trainer.logger=['console'] \
     trainer.n_gpus_per_node=1 \
-    trainer.test_freq=1 | tee $OUTPUT_FILE;
+    trainer.test_freq=1 \
+    trainer.save_freq=110 | tee $OUTPUT_FILE;
 
 python3 tests/e2e/check_results.py --output_file=$OUTPUT_FILE
 rm -rf $OUTPUT_FILE

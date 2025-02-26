@@ -1,11 +1,10 @@
 .. _quickstart:
 
 =========================================================
-Quickstart: Post-train a LLM using PPO with GSM8K dataset
+Quickstart: PPO training on GSM8K dataset
 =========================================================
 
-Post-train a LLM using GSM8K dataset
-===================================================================
+Post-train a LLM using GSM8K dataset.
 
 Introduction
 ------------
@@ -52,9 +51,9 @@ We preprocess the dataset in parquet format so that (1) it contains necessary fi
 Step 2: Download a model for post-training
 -------------------------------------------
 
-Usually we recommend starting with an "instruct" model variant so that the model follows instructions. In this example, we start with the ``Qwen2.5-0.5B-Instruct`` model.
+In this example, we start with the ``Qwen2.5-0.5B-Instruct`` model.
 
-If you start from a "base" model variant, doing SFT before RL is recommended. Refer to the `sft directory <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k>`_ and `SFT Trainer <https://github.com/volcengine/verl/blob/main/verl/trainer/fsdp_sft_trainer.py>`_ for further details.
+If you want to perform SFT before RL, refer to the :doc:`Complete GSM8K Example<../examples/gsm8k_example>`, the `sft directory <https://github.com/volcengine/verl/blob/main/examples/sft/gsm8k>`_ and `SFT Trainer <https://github.com/volcengine/verl/blob/main/verl/trainer/fsdp_sft_trainer.py>`_ for further details.
 
 .. code-block:: bash
 
@@ -86,7 +85,6 @@ Set the ``data.train_files`` ,\ ``data.val_files``, ``actor_rollout_ref.model.pa
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     data.train_batch_size=256 \
-    data.val_batch_size=1312 \
     data.max_prompt_length=512 \
     data.max_response_length=256 \
     actor_rollout_ref.model.path=Qwen/Qwen2.5-0.5B-Instruct \

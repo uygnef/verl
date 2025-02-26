@@ -30,7 +30,9 @@ from megatron.optimizer import DistributedOptimizer
 from verl.utils.megatron.optimizer_config import OptimizerConfig
 from megatron.core import parallel_state as mpu
 from megatron.core import ModelParallelConfig
+from megatron.core.utils import get_model_config
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.distributed import finalize_model_grads
 # from megatron.core.optimizer import DistributedOptimizer
 
 from omegaconf import OmegaConf
@@ -110,7 +112,6 @@ class MegatronPPOActor(BasePPOActor):
         self._validate_config(config)
         self.model_config = model_config
         self.megatron_config = megatron_config
-        # self.megatron_args = get_args()
         self.actor_module = actor_module
         self.actor_optimizer: DistributedOptimizer = actor_optimizer
         self.actor_optimizer_config = actor_optimizer_config
@@ -126,6 +127,9 @@ class MegatronPPOActor(BasePPOActor):
             'pipeline_model_parallel_split_rank': None,
             'reduce_grads_use_alltoall': False
         })
+
+        config = get_model_config(self.actor_module[0])
+        config.finalize_model_grads_func = finalize_model_grads
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
@@ -363,9 +367,6 @@ class MegatronPPOActor(BasePPOActor):
                 pass
             else:
                 raise NotImplementedError
-
-            for metric in metric_micro_batch:
-                append_to_dict(metrics, metric)  # append the metric from this micro-batch to global metrics.
 
         # add empty cache after each compute
         torch.cuda.empty_cache()

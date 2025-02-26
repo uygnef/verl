@@ -1,8 +1,7 @@
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_API_KEY=32b85f731210a303efe3a8d1ba11369f6c23d5dd
+export PYTHONPATH=$PYTHONPATH:/home/luban/Megatron-LM
 output_dir=/nfs/ofs-llm-ssd/user/fengyu/models/Qwen2.5-7B-grpo-ori
-source /opt/miniconda3/bin/activate verl
-cd /nfs/ofs-llab-volume/users/fengyu/new_verl/verl
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=data/gsm8k/train.parquet \

@@ -13,14 +13,14 @@
 # limitations under the License.
 
 import torch
-from typing import Optional, Tuple, Callable
+from typing import Optional, List, Union, Tuple, Callable
 import sys
 if sys.version_info >= (3, 11):
     from typing import Unpack
 else:
     from typing_extensions import Unpack
 
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv
 from transformers.cache_utils import Cache
 from transformers.utils import logging
 from transformers.modeling_flash_attention_utils import _flash_attention_forward

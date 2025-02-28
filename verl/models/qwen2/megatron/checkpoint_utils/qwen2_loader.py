@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
+import importlib
 import time
-from typing import Dict, Any, Callable, Optional
-import torch.distributed as dist
 
+import torch
+import torch.distributed as dist
+from packaging.version import Version
+
+megatron_version = Version(importlib.metadata.version('megatron-core'))
 
 def _megatron_calc_layer_map(config):
     """Calculate the mapping of global layer_idx to local layer_idx
@@ -25,7 +28,6 @@ def _megatron_calc_layer_map(config):
             mapping from the global layer index to
             a tuple of (pp_rank, virtual_pp_rank, layer_idx inside model)
     """
-    import megatron
     from megatron.core import mpu
 
     pp_size = mpu.get_pipeline_model_parallel_world_size()
@@ -48,12 +50,15 @@ def _megatron_calc_layer_map(config):
     return layer_map
 
 
-def load_state_dict_to_megatron_qwen2(state_dict, wrapped_models, config, params_dtype, is_value_model=False):
+def load_state_dict_to_megatron_qwen2(state_dict, wrapped_models, config, params_dtype, is_value_model=False, tie_word_embeddings=False):
     """Load merged state_dict to sharded Megatron module in training.
     """
-    import megatron
     from megatron.core import mpu
-    from megatron.utils import print_rank_0, unwrap_model
+    megatron_version = Version(importlib.metadata.version('megatron-core'))
+    if megatron_version < Version('0.6.0'):
+        from megatron.utils import print_rank_0, unwrap_model
+    else:
+        from megatron.training.utils import print_rank_0, unwrap_model
     from megatron.core.transformer.module import Float16Module
     from megatron.core import DistributedDataParallel as LocalDDP
     from torch.nn.parallel import DistributedDataParallel as torchDDP
@@ -432,27 +437,31 @@ def load_state_dict_to_megatron_qwen2(state_dict, wrapped_models, config, params
             "model.norm.weight",
         )
 
-        print_rank_0("loading lm_head...")
-        lm_head_weight = None
-        if pp_rank + 1 == pp_size:
-            lm_head_weight = gpt_model_module.lm_head.weight
-
-        if is_value_model:
-            # if torch.distributed.get_rank() == 0:
-            if 'lm_head.weight' in state_dict and state_dict['lm_head.weight'].shape[0] == 1:
-                _broadcast_tensor(lm_head_weight, "lm_head.weight")
-            elif 'reward_head.weight' in state_dict and state_dict['reward_head.weight'].shape[0] == 1:
-                _broadcast_tensor(lm_head_weight, "reward_head.weight")
-                print_rank_0('load lm_head from value_head weight')
-            else:
-                _broadcast_tensor(None, "lm_head.weight")
-                print_rank_0('fail to match lm_head in value_model')
-            # else:
-
-            #     _broadcast_tensor(lm_head_weight, "lm_head.weight")
-
+        if tie_word_embeddings:
+            print_rank_0("tie_word_embeddings skip load lm_head")
         else:
-            _broadcast_tp_shard_tensor(lm_head_weight, "lm_head.weight")
+            print_rank_0("loading lm_head...")
+            lm_head_weight = None
+            if pp_rank + 1 == pp_size:
+                lm_head_weight = gpt_model_module.lm_head.weight
+
+            if is_value_model:
+                # if torch.distributed.get_rank() == 0:
+                if 'lm_head.weight' in state_dict and state_dict['lm_head.weight'].shape[0] == 1:
+                    _broadcast_tensor(lm_head_weight, "lm_head.weight")
+                elif 'reward_head.weight' in state_dict and state_dict['reward_head.weight'].shape[0] == 1:
+                    _broadcast_tensor(lm_head_weight, "reward_head.weight")
+                    print_rank_0('load lm_head from value_head weight')
+                else:
+                    _broadcast_tensor(None, "lm_head.weight")
+                    print_rank_0('fail to match lm_head in value_model')
+                # else:
+
+                #     _broadcast_tensor(lm_head_weight, "lm_head.weight")
+
+            else:
+                _broadcast_tp_shard_tensor(lm_head_weight, "lm_head.weight")
+
     dist.barrier()
     # Broadcast weights inside data parallel groups
     for wrapped_model in wrapped_models:

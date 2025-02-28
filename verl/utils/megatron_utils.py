@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Pretrain utilities."""
+import importlib
+import os
+
+from packaging.version import Version
 from typing import Any, Dict
 import time
 from omegaconf import DictConfig
@@ -29,6 +33,11 @@ from megatron.core.transformer.module import Float16Module
 # from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.enums import ModelType
+
+
+megatron_version = Version(importlib.metadata.version('megatron-core'))
+if megatron_version >= Version('0.10.0rc0'):
+    from megatron.core.distributed import DistributedDataParallelConfig
 
 
 def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True):
@@ -251,3 +260,9 @@ def load_megatron_param_and_grad(module_list: nn.ModuleList, device_id, load_gra
                 if load_grad and param.grad is not None:
                     param.grad = param.grad.to(device_id, non_blocking=True)
     torch.cuda.empty_cache()
+
+def set_checkpoint_dir(checkpoint_path):
+    # TODO support vpp
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    return os.path.join(checkpoint_path, f"pp{pp_rank}_tp{tp_rank}/")

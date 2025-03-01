@@ -12,25 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
 import time
 
 import torch
 import torch.distributed as dist
 from megatron.core import mpu
-from packaging.version import Version
-
-megatron_version = Version(importlib.metadata.version('megatron-core'))
-if megatron_version < Version('0.6.0'):
-    from megatron.utils import print_rank_0, unwrap_model
-    from megatron.model import Float16Module
-    from megatron.model import DistributedDataParallel as LocalDDP
-    from torch.nn.parallel import DistributedDataParallel as torchDDP
-else:
-    from megatron.training.utils import print_rank_0, unwrap_model
-    from megatron.core.distributed import DistributedDataParallel as LocalDDP
-    from megatron.core.transformer.module import Float16Module
-    from megatron.core.distributed import DistributedDataParallel as torchDDP
+from megatron.model import DistributedDataParallel as LocalDDP
+from megatron.model import Float16Module
+from megatron.utils import print_rank_0, unwrap_model
+from torch.nn.parallel import DistributedDataParallel as torchDDP
 
 
 def _megatron_calc_global_rank(tp_rank: int = 0, dp_rank: int = 0, pp_rank: int = 0):

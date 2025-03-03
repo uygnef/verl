@@ -24,7 +24,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.utils.fs import copy_local_path_from_hdfs
 
 MODEL_PATH = '/nfs/ofs-llm-ssd/models/Meta-Llama-3.1-8B-Instruct'
-DATA_PATH = 'data/gsm8k/'
+DATA_PATH = '/nfs/ofs-llab-volume/users/fengyu/new_verl/verl/data/gsm8k/'
 SAVE_PATH = '/tmp-data/checkpoint'
 def make_reward_function(tokenizer, num_examine):
     return None
@@ -110,13 +110,13 @@ def check_result(origin_path, megatron_path, input_text):
     tokenizer = AutoTokenizer.from_pretrained(origin_path)
 
     inputs = tokenizer(input_text, return_tensors="pt").to('cuda')
-    origin_outputs = origin_model.generate(**inputs, max_new_tokens=8)
+    origin_outputs = origin_model.generate(**inputs, max_new_tokens=8, do_sample=False)
     origin_text = tokenizer.decode(origin_outputs[0], skip_special_tokens=True)
     print(f"origin_text: {origin_text}")
 
     megatron_model = AutoModelForCausalLM.from_pretrained(megatron_path, torch_dtype=torch_dtype,).eval()
     megatron_model =megatron_model.to('cuda')
-    megatron_outputs = megatron_model.generate(**inputs, max_new_tokens=8)
+    megatron_outputs = megatron_model.generate(**inputs, max_new_tokens=8, do_sample=False)
     megatron_text = tokenizer.decode(megatron_outputs[0], skip_special_tokens=True)
     print(f"megatron_text: {megatron_text}")
 

@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Pretrain utilities."""
+import importlib
+import os
+
+from packaging.version import Version
 from typing import Any, Dict
 import time
 from omegaconf import DictConfig
@@ -29,6 +33,11 @@ from megatron.core.transformer.module import Float16Module
 # from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.enums import ModelType
+
+
+megatron_version = Version(importlib.metadata.version('megatron-core'))
+if megatron_version >= Version('0.10.0rc0'):
+    from megatron.core.distributed import DistributedDataParallelConfig
 
 
 def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True):
@@ -100,17 +109,33 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         model = [Float16Module(config, model_module) for model_module in model]
 
     if wrap_with_ddp:
-        model = [
-            DDP(config=config,
-                module=model_chunk,
-                data_parallel_group=mpu.get_data_parallel_group(with_context_parallel=True),
-                accumulate_allreduce_grads_in_fp32=True,
-                overlap_grad_reduce=False,
-                use_distributed_optimizer=True,
-                disable_bucketing=(model_chunk_idx > 0)) for (model_chunk_idx, model_chunk) in enumerate(model)
-        ]
-        # # Broadcast params from data parallel src rank to other data parallel ranks.
-        # if args.data_parallel_random_init:
+        # to fit inner megatron code (branch 20231223)
+        if megatron_version >= Version('0.10.0rc0'):
+            kwargs = {}
+            kwargs['grad_reduce_in_fp32'] = True        # accumulate_allreduce_grads_in_fp32=True,
+            kwargs['overlap_grad_reduce'] = False       # overlap_grad_reduce=False,
+            kwargs['use_distributed_optimizer'] = True  # use_distributed_optimizer=True,
+            kwargs['check_for_nan_in_grad'] = True      # new param, default is True in arguments.
+            ddp_config = DistributedDataParallelConfig(**kwargs)
+
+            model = [
+                DDP(config=config,
+                    ddp_config=ddp_config,
+                    module=model_chunk,
+                    disable_bucketing=(model_chunk_idx > 0)) for (model_chunk_idx, model_chunk) in enumerate(model)
+            ]
+        else:
+            model = [
+                DDP(config=config,
+                    module=model_chunk,
+                    data_parallel_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                    accumulate_allreduce_grads_in_fp32=True,
+                    overlap_grad_reduce=False,
+                    use_distributed_optimizer=True,
+                    disable_bucketing=(model_chunk_idx > 0)) for (model_chunk_idx, model_chunk) in enumerate(model)
+            ]
+            # # Broadcast params from data parallel src rank to other data parallel ranks.
+            # if args.data_parallel_random_init:
         for model_module in model:
             model_module.broadcast_params()
     return model
@@ -216,7 +241,11 @@ class FakeTimers:
     """Disable All Megatron Timing with FakeTimers"""
 
     def __init__(self):
-        from megatron.timers import DummyTimer
+        megatron_version = Version(importlib.metadata.version('megatron-core'))
+        if megatron_version < Version('0.6.0'):
+            from megatron.timers import DummyTimer
+        else:
+            from megatron.core.timers import DummyTimer
         self.dummy_timer = DummyTimer()
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
@@ -251,3 +280,9 @@ def load_megatron_param_and_grad(module_list: nn.ModuleList, device_id, load_gra
                 if load_grad and param.grad is not None:
                     param.grad = param.grad.to(device_id, non_blocking=True)
     torch.cuda.empty_cache()
+
+def set_checkpoint_dir(checkpoint_path):
+    # TODO support vpp
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    return os.path.join(checkpoint_path, f"pp{pp_rank}_tp{tp_rank}/")

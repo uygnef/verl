@@ -404,6 +404,29 @@ class RayPPOTrainer(object):
         self._validate_config()
         self._create_dataloader()
 
+    def set_checkpoint_file(self):
+        if self.config.trainer.resume_mode == 'disable':
+            return None
+
+        # load from hdfs
+        if self.config.trainer.default_hdfs_dir is not None:
+            raise NotImplementedError('load from hdfs is not implemented yet')
+        else:
+            checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
+            if not os.path.isabs(checkpoint_folder):
+                working_dir = os.getcwd()
+                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+            global_step_folder = find_latest_ckpt_path(checkpoint_folder)  # None if no latest
+
+        # find global_step_folder
+        if self.config.trainer.resume_mode == 'auto':
+            if global_step_folder is None:
+                print('Training from scratch')
+                return None
+            else:
+                return global_step_folder
+        return None
+
     def _validate_config(self):
         config = self.config
         # number of GPUs total
@@ -786,7 +809,7 @@ class RayPPOTrainer(object):
 
         # load from hdfs
         if self.config.trainer.default_hdfs_dir is not None:
-            NotImplementedError('load from hdfs is not implemented yet')
+            raise NotImplementedError('load from hdfs is not implemented yet')
         else:
             checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
             if not os.path.isabs(checkpoint_folder):

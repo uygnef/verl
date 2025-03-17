@@ -80,7 +80,7 @@ class ActorRolloutRefWorker(Worker):
         self.config = config
         import torch.distributed
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            torch.distributed.init_process_group()
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
@@ -148,7 +148,7 @@ class ActorRolloutRefWorker(Worker):
         from verl.utils.model import print_model_size, update_model_config, get_generation_config
         from verl.utils.torch_dtypes import PrecisionType
         from transformers import AutoModelForCausalLM, AutoConfig
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, CPUOffload
         from torch import optim
 
         assert role in ['actor', 'ref']
@@ -290,17 +290,18 @@ class ActorRolloutRefWorker(Worker):
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f'rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}'
         rollout_device_mesh = init_device_mesh('cuda', mesh_shape=(dp, infer_tp), mesh_dim_names=['dp', 'infer_tp'])
-
-        if self.config.rollout.name == 'hf':
+        rollout_name = self.config.rollout.name
+        if rollout_name == 'hf':
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager import BaseShardingManager
             rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
-        elif self.config.rollout.name == 'vllm':
+
+        elif rollout_name == 'vllm':
             from verl.workers.rollout.vllm_rollout import vLLMRollout, vllm_mode
             from verl.workers.sharding_manager import FSDPVLLMShardingManager
-            log_gpu_memory_usage('Before building vllm rollout', logger=None)
+            log_gpu_memory_usage(f'Before building {rollout_name} rollout', logger=None)
             local_path = copy_local_path_from_hdfs(self.config.model.path)
             if vllm_mode == 'customized':
                 rollout = vLLMRollout(actor_module=self.actor_module_fsdp,
@@ -315,7 +316,7 @@ class ActorRolloutRefWorker(Worker):
                                       device_mesh=rollout_device_mesh)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
-            log_gpu_memory_usage('After building vllm rollout', logger=None)
+            log_gpu_memory_usage(f'After building {rollout_name} rollout', logger=None)
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = 'dummy_hf'
             rollout_sharding_manager = FSDPVLLMShardingManager(module=self.actor_module_fsdp,
@@ -323,6 +324,30 @@ class ActorRolloutRefWorker(Worker):
                                                                model_config=self.actor_model_config,
                                                                full_params='hf' in self.config.rollout.load_format,
                                                                device_mesh=rollout_device_mesh)
+            log_gpu_memory_usage('After building sharding manager', logger=None)
+
+        elif rollout_name == 'sglang':
+            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to SGLang's model_runner would check CUDA device capability.
+            # However, due to veRL's setting, the main process of ray can not find any CUDA device, which would potentially lead to:
+            # "RuntimeError: No CUDA GPUs are available".
+            # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and we import it here use the abs path.
+            # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
+            from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
+            log_gpu_memory_usage(f'Before building {rollout_name} rollout', logger=None)
+            rollout = SGLangRollout(actor_module=self.config.model.path,
+                                    config=self.config.rollout,
+                                    tokenizer=self.tokenizer,
+                                    model_hf_config=self.actor_model_config)
+            log_gpu_memory_usage(f'After building {rollout_name} rollout', logger=None)
+
+            if torch.distributed.get_world_size() == 1:
+                self.config.rollout.load_format = 'dummy_hf'
+            rollout_sharding_manager = FSDPSGLangShardingManager(module=self.actor_module_fsdp,
+                                                                 inference_engine=rollout.inference_engine,
+                                                                 model_config=self.actor_model_config,
+                                                                 full_params='hf' in self.config.rollout.load_format,
+                                                                 device_mesh=rollout_device_mesh)
             log_gpu_memory_usage('After building sharding manager', logger=None)
 
         return rollout, rollout_sharding_manager
@@ -472,7 +497,6 @@ class ActorRolloutRefWorker(Worker):
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
-
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
@@ -616,9 +640,9 @@ class CriticWorker(Worker):
 
     def _build_critic_model_optimizer(self, config):
         # the following line is necessary
-        from verl.utils.model import LambdaLayer, print_model_size, squeeze
+        from verl.utils.model import print_model_size
         from verl.utils.torch_dtypes import PrecisionType
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision
         from torch import optim
 
         local_path = copy_local_path_from_hdfs(config.model.path)
@@ -643,7 +667,6 @@ class CriticWorker(Worker):
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         from transformers import AutoConfig, AutoModelForTokenClassification
-        from torch import nn
 
         trust_remote_code = False
         critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
@@ -884,7 +907,7 @@ class RewardModelWorker(Worker):
     def _build_model(self, config):
         # the following line is necessary
         from transformers import AutoConfig
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, CPUOffload
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, CPUOffload
 
         # download the checkpoint from hdfs
         local_path = copy_local_path_from_hdfs(config.model.path)
@@ -918,10 +941,10 @@ class RewardModelWorker(Worker):
             warnings.simplefilter("ignore")
             setattr(model_config, 'classifier_dropout', 0.)
             reward_module = self.load_method.from_pretrained(pretrained_model_name_or_path=local_path,
-                                                                            config=model_config,
-                                                                            torch_dtype=torch.bfloat16,
-                                                                            attn_implementation='flash_attention_2',
-                                                                            trust_remote_code=trust_remote_code)
+                                                             config=model_config,
+                                                             torch_dtype=torch.bfloat16,
+                                                             attn_implementation='flash_attention_2',
+                                                             trust_remote_code=trust_remote_code)
             reward_module.to(torch.bfloat16)
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 

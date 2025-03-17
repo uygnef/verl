@@ -14,6 +14,7 @@
 
 from importlib.metadata import version, PackageNotFoundError
 from packaging import version as vs
+from verl.utils.import_utils import is_sglang_available
 
 
 def get_version(pkg):
@@ -55,6 +56,7 @@ elif vs.parse(package_version) >= vs.parse('0.6.6.post2.dev252+g8027a724'):
     from vllm.distributed import parallel_state
     from .vllm_spmd.dtensor_weight_loaders import load_dtensor_weights
 else:
-    raise ValueError(
-        f'vllm version {package_version} not supported. Currently supported versions are 0.3.1, 0.4.2, 0.5.4, 0.6.3 and 0.7.0+'
-    )
+    if not is_sglang_available():
+        raise ValueError(
+            f'vllm version {package_version} not supported and SGLang also not Found. Currently supported vllm versions are 0.3.1, 0.4.2, 0.5.4, 0.6.3 and 0.7.0+'
+        )

@@ -33,7 +33,7 @@ from omegaconf import DictConfig
 from tensordict import TensorDict
 from verl import DataProto
 from verl.workers.rollout.base import BaseRollout
-from verl.utils.torch_functional import get_eos_mask, pad_sequence_to_length, pad_2d_list_to_length
+from verl.utils.torch_functional import get_eos_mask, pad_sequence_to_length
 from sglang.srt.entrypoints.verl_engine import VerlEngine
 from torch.distributed.device_mesh import init_device_mesh
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -232,8 +232,6 @@ class SGLangRollout(BaseRollout):
                 top_p=1,
                 top_k=-1,
                 ignore_eos=False,
-                min_new_tokens=0,
-                max_new_tokens=4096,
                 skip_special_tokens=True,
                 spaces_between_special_tokens=True,
             )

@@ -337,12 +337,9 @@ class CustomRewardModelWorker(Worker):
         ]
 
         rm_gen_batch = self.prompts_to_dataproto(rm_gen_prompts)
-        print(f'rm_gen_batch: {rm_gen_batch}')
         rm_output_batch = self.generate(rm_gen_batch)
-        print(f'rm_output_batch: {rm_output_batch}')
 
         rm_output_str = self.tokenizer.batch_decode(rm_output_batch.batch['responses'], skip_special_tokens=True)
-        print(f'rm_output_str: {rm_output_str}')
 
         scores = [
             self._compute_score_fn(solution, truth, response)
@@ -356,7 +353,7 @@ class CustomRewardModelWorker(Worker):
         for i in range(len(data)):
             reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
             ## TODO: print reward response to examine
-        print(f'reward_tensor summary: {reward_tensor.sum(dim=-1)}')
+        # print(f'reward_tensor summary: {reward_tensor.sum(dim=-1)}')
 
         ret = DataProto.from_single_dict({'rm_scores': reward_tensor})
 

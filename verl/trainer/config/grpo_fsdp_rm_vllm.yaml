@@ -130,7 +130,7 @@ critic:
 reward_model:
   enable: True
   strategy: fsdp
-  name: vllm_generate_fsdp
+  name: generative_fsdp
   has_validate_fn: False
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}

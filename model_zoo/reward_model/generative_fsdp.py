@@ -21,7 +21,6 @@ from verl.utils.model import compute_position_id_with_mask
 
 from verl.workers.fsdp_workers import create_device_mesh, get_sharding_strategy
 
-
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'INFO'))
 
@@ -36,7 +35,7 @@ class CustomRewardModelWorker(Worker):
         import torch.distributed
 
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend='nccl')
+            torch.distributed.init_process_group()
         self.config = config
 
         world_size = torch.distributed.get_world_size()
@@ -58,9 +57,8 @@ class CustomRewardModelWorker(Worker):
         self.response_length = self.config.generate.get('response_length', 512)
         ## first get from config
         ## reward model prompts may be longer than the input prompt plus response
-        self.max_prompt_length = self.config.generate.get(
-            'max_prompt_length', 2 * (self.prompt_length + self.response_length)
-        )
+        self.max_prompt_length = self.config.generate.get('max_prompt_length',
+                                                          2 * (self.prompt_length + self.response_length))
         ## raise error on truncation
         self.truncation = self.config.generate.get('truncation', 'error')
         # the number of batches of decoded responses to print to the console
@@ -127,13 +125,11 @@ class CustomRewardModelWorker(Worker):
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            reward_module = AutoModelForCausalLM.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=model_config,
-                attn_implementation='flash_attention_2',
-                trust_remote_code=trust_remote_code,
-            )
+            reward_module = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path=local_path,
+                                                                 torch_dtype=torch_dtype,
+                                                                 config=model_config,
+                                                                 attn_implementation='flash_attention_2',
+                                                                 trust_remote_code=trust_remote_code)
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             reward_module.to(torch_dtype)
 
@@ -166,8 +162,7 @@ class CustomRewardModelWorker(Worker):
             mixed_precision=None,
             sync_module_states=True,
             device_mesh=self.device_mesh,
-            forward_prefetch=False,
-        )
+            forward_prefetch=False)
 
         log_gpu_memory_usage('After RM FSDP init', logger=None)
 
@@ -180,45 +175,62 @@ class CustomRewardModelWorker(Worker):
         infer_tp = self.config.generate.tensor_model_parallel_size
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, (
-            f'rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}'
-        )
+            f'rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}')
         rollout_device_mesh = init_device_mesh('cuda', mesh_shape=(dp, infer_tp), mesh_dim_names=['dp', 'infer_tp'])
 
-        if self.config.generate.name == 'vllm':
+        rollout_name = self.config.generate.name
+        if rollout_name == 'vllm':
             from verl.workers.rollout.vllm_rollout import vLLMRollout, vllm_mode
             from verl.workers.sharding_manager import FSDPVLLMShardingManager
 
-            log_gpu_memory_usage('Before building vllm reward model', logger=None)
+            log_gpu_memory_usage(f'Before building {rollout_name} reward model', logger=None)
             local_path = copy_local_path_from_hdfs(self.config.model.path)
             if vllm_mode == 'customized':
                 print(f'vllm mode: {vllm_mode}')
-                rm_rollout = vLLMRollout(
-                    actor_module=self.reward_module_fsdp,
-                    config=self.config.generate,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.reward_model_config,
-                )
+                rm_rollout = vLLMRollout(actor_module=self.reward_module_fsdp,
+                                         config=self.config.generate,
+                                         tokenizer=self.tokenizer,
+                                         model_hf_config=self.reward_model_config)
             elif vllm_mode == 'spmd':
                 print(f'vllm mode: {vllm_mode}')
-                rm_rollout = vLLMRollout(
-                    model_path=local_path,
-                    config=self.config.generate,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.reward_model_config,
-                    device_mesh=rollout_device_mesh,
-                )
+                rm_rollout = vLLMRollout(model_path=local_path,
+                                         config=self.config.generate,
+                                         tokenizer=self.tokenizer,
+                                         model_hf_config=self.reward_model_config,
+                                         device_mesh=rollout_device_mesh)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
-            log_gpu_memory_usage('After building vllm reward model', logger=None)
+            torch.cuda.empty_cache()
+            log_gpu_memory_usage(f'After building {rollout_name} reward model', logger=None)
 
-            rm_rollout_sharding_manager = FSDPVLLMShardingManager(
-                module=self.reward_module_fsdp,
-                inference_engine=rm_rollout.inference_engine,
-                model_config=self.reward_model_config,
-                full_params='hf' in self.config.generate.load_format,
-                device_mesh=rollout_device_mesh,
-            )
-            log_gpu_memory_usage('After building sharding manager', logger=None)
+            if torch.distributed.get_world_size() == 1:
+                self.config.generate.load_format = 'dummy_hf'
+            rm_rollout_sharding_manager = FSDPVLLMShardingManager(module=self.reward_module_fsdp,
+                                                                  inference_engine=rm_rollout.inference_engine,
+                                                                  model_config=self.reward_model_config,
+                                                                  full_params='hf' in self.config.generate.load_format,
+                                                                  device_mesh=rollout_device_mesh)
+            log_gpu_memory_usage('After building RM sharding manager', logger=None)
+        elif rollout_name == 'sglang':
+            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
+            log_gpu_memory_usage(f'Before building {rollout_name} reward model', logger=None)
+            rm_rollout = SGLangRollout(actor_module=self.config.model.path,
+                                       config=self.config.generate,
+                                       tokenizer=self.tokenizer,
+                                       model_hf_config=self.reward_model_config)
+            torch.cuda.empty_cache()
+            log_gpu_memory_usage(f'After building {rollout_name} reward model', logger=None)
+
+            if torch.distributed.get_world_size() == 1:
+                self.config.generate.load_format = 'dummy_hf'
+            rm_rollout_sharding_manager = FSDPSGLangShardingManager(module=self.reward_module_fsdp,
+                                                                    inference_engine=rm_rollout.inference_engine,
+                                                                    model_config=self.reward_model_config,
+                                                                    full_params='hf'
+                                                                    in self.config.generate.load_format,
+                                                                    device_mesh=rollout_device_mesh)
+            log_gpu_memory_usage('After building RM sharding manager', logger=None)
         else:
             raise NotImplementedError(f'generate name: {self.config.generate.name} is not supported')
 
@@ -239,22 +251,23 @@ class CustomRewardModelWorker(Worker):
         prompts = prompts.to('cuda')
 
         log_gpu_memory_usage('Before RM generate loading model', logger=None)
-        if self._is_offload_param:
+        rollout_name = self.config.generate.name
+        if self._is_offload_param and rollout_name != 'sglang':
             load_fsdp_model_to_gpu(self.reward_module_fsdp)
         log_gpu_memory_usage('After RM generate loading model', logger=None)
 
         prompts.batch = prompts.batch.cuda()
         meta_info = {
-            'eos_token_id': self.generation_config.eos_token_id
-            if self.generation_config is not None
-            else self.tokenizer.eos_token_id,
-            'pad_token_id': self.generation_config.pad_token_id
-            if self.generation_config is not None
-            else self.tokenizer.pad_token_id,
+            'eos_token_id':
+                self.generation_config.eos_token_id
+                if self.generation_config is not None else self.tokenizer.eos_token_id,
+            'pad_token_id':
+                self.generation_config.pad_token_id
+                if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
         with self.rm_rollout_sharding_manager:
-            if self._is_offload_param:
+            if self._is_offload_param and rollout_name != 'sglang':
                 offload_fsdp_model_to_cpu(self.reward_module_fsdp)
             log_gpu_memory_usage('After entering RM rollout sharding manager', logger=None)
 
@@ -274,14 +287,12 @@ class CustomRewardModelWorker(Worker):
 
     def prompts_to_dataproto(self, prompts: List[str]) -> DataProto:
         ## TODO: get the longest prompt length across all dp ranks, pad to the same length
-        encoded = self.tokenizer(
-            prompts,
-            return_tensors='pt',
-            add_special_tokens=False,
-            padding='max_length',
-            max_length=self.max_prompt_length,
-            padding_side='left',
-        )
+        encoded = self.tokenizer(prompts,
+                                 return_tensors='pt',
+                                 add_special_tokens=False,
+                                 padding='max_length',
+                                 max_length=self.max_prompt_length,
+                                 padding_side='left')
         input_ids = encoded['input_ids']
         attention_mask = encoded['attention_mask']
         sequence_length = input_ids.shape[-1]
@@ -300,9 +311,11 @@ class CustomRewardModelWorker(Worker):
                 raise NotImplementedError(f'Unknown truncation method {self.truncation}')
 
         position_ids = compute_position_id_with_mask(attention_mask)
-        ret = DataProto.from_single_dict(
-            {'input_ids': input_ids, 'attention_mask': attention_mask, 'position_ids': position_ids}
-        )
+        ret = DataProto.from_single_dict({
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'position_ids': position_ids
+        })
         return ret
 
     def _compute_rm_score(self, data: DataProto):

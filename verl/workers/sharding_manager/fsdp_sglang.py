@@ -29,7 +29,7 @@ import os
 import logging
 import torch
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.api import ShardingStrategy, ShardedStateDictConfig, StateDictType, FullStateDictConfig
+from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType, FullStateDictConfig
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl import DataProto
@@ -37,8 +37,7 @@ from verl.utils.torch_functional import (broadcast_dict_tensor, allgather_dict_t
 from verl.utils.debug import log_gpu_memory_usage
 from sglang.srt.entrypoints.verl_engine import VerlEngine
 from .base import BaseShardingManager
-from verl.third_party.sglang import parallel_state as sglang_ps
-# from vllm.distributed import parallel_state as sglang_ps
+# from verl.third_party.sglang import parallel_state as sglang_ps
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
@@ -80,18 +79,21 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             self.gen_random_states = None
 
     def __enter__(self):
-        log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=logger)
+        local_rank = torch.distributed.get_rank()
+        log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=None, rank=local_rank)
         params = self.module.state_dict()
-        log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=logger)
-        # Copy, not share memory
-        load_format = None if self.full_params else 'dtensor'
+        ## set all the params to cpu, to avoid cuda device mismatch in sglang engine
+        for k, v in params.items():
+            params[k] = v.cpu()
+        log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=None, rank=local_rank)
 
+        self.inference_engine.resume_memory_occupation()
         self.inference_engine.update_weights_from_tensor([(k, v) for k, v in params.items()], load_format=None)
-        log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
+        log_gpu_memory_usage('After sync model weights in sharding manager', logger=None, rank=local_rank)
 
         del params
         torch.cuda.empty_cache()
-        log_gpu_memory_usage('After del state_dict and empty_cache in sharding manager', logger=logger)
+        log_gpu_memory_usage('After del state_dict and empty_cache in sharding manager', logger=None, rank=local_rank)
 
         # TODO: offload FSDP model weights
         # self.module.cpu()
@@ -105,9 +107,10 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             torch.cuda.set_rng_state(self.gen_random_states)
 
     def __exit__(self, exc_type, exc_value, traceback):
-        log_gpu_memory_usage('Before SGLang offload in sharding manager', logger=logger)
-        self.inference_engine.release_memory_occupation
-        log_gpu_memory_usage('After SGLang offload in sharding manager', logger=logger)
+        local_rank = torch.distributed.get_rank()
+        log_gpu_memory_usage('Before SGLang offload in sharding manager', logger=None, rank=local_rank)
+        self.inference_engine.release_memory_occupation()
+        log_gpu_memory_usage('After SGLang offload in sharding manager', logger=None, rank=local_rank)
 
         # self.module.to('cuda')
         # if torch.distributed.get_rank() == 0:

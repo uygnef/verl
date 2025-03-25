@@ -82,9 +82,6 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         local_rank = torch.distributed.get_rank()
         log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=None, rank=local_rank)
         params = self.module.state_dict()
-        ## set all the params to cpu, to avoid cuda device mismatch in sglang engine
-        for k, v in params.items():
-            params[k] = v.cpu()
         log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=None, rank=local_rank)
 
         self.inference_engine.resume_memory_occupation()

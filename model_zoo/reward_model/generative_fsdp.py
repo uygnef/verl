@@ -251,8 +251,7 @@ class CustomRewardModelWorker(Worker):
         prompts = prompts.to('cuda')
 
         log_gpu_memory_usage('Before RM generate loading model', logger=None)
-        rollout_name = self.config.generate.name
-        if self._is_offload_param and rollout_name != 'sglang':
+        if self._is_offload_param:
             load_fsdp_model_to_gpu(self.reward_module_fsdp)
         log_gpu_memory_usage('After RM generate loading model', logger=None)
 
@@ -267,7 +266,7 @@ class CustomRewardModelWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         with self.rm_rollout_sharding_manager:
-            if self._is_offload_param and rollout_name != 'sglang':
+            if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.reward_module_fsdp)
             log_gpu_memory_usage('After entering RM rollout sharding manager', logger=None)
 
@@ -349,7 +348,7 @@ class CustomRewardModelWorker(Worker):
 
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
         ## to token-level scores
-        print(f'valid_response_length: {valid_response_length}')
+        # print(f'valid_response_length: {valid_response_length}')
         for i in range(len(data)):
             reward_tensor[i, valid_response_length[i].item() - 1] = scores[i]
             ## TODO: print reward response to examine

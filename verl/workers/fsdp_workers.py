@@ -29,6 +29,7 @@ from torch.distributed.device_mesh import init_device_mesh
 
 import verl.utils.torch_functional as verl_F
 from verl.utils.py_functional import convert_to_regular_types
+from omegaconf import DictConfig, open_dict
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
@@ -208,7 +209,7 @@ class ActorRolloutRefWorker(Worker):
 
         # override model kwargs
         actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
-                
+
         # patch for kimi-vl
         if getattr(actor_model_config, "model_type", None) == "kimi_vl":
             actor_model_config.text_config.topk_method = "greedy"
@@ -652,7 +653,7 @@ class ActorRolloutRefWorker(Worker):
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
-            
+
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
@@ -903,7 +904,7 @@ class CriticWorker(Worker):
 
             if config.model.get("enable_gradient_checkpointing", False):
                 critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        
+
         if self._is_lora:
             print("Applying LoRA to critic module")
             critic_module.enable_input_require_grads()

@@ -40,7 +40,6 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 from verl.third_party.sglang import parallel_state as sglang_ps
 import torch.distributed
 from torch.nn.utils.rnn import pad_sequence
-import multiprocessing
 
 if TYPE_CHECKING:
     from torch import nn
@@ -90,6 +89,7 @@ class SGLangRollout(BaseRollout):
         config: DictConfig,
         tokenizer,
         model_hf_config,
+        n_gpus_per_node: int,
         **kwargs,
     ):
         """A SGLang rollout. It requires the module is supported by the SGLang.
@@ -103,12 +103,6 @@ class SGLangRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
-
-        # TODO(linjunrong.ocss884): this substitution is left for resolving SGLang conflict with ray devices
-        # isolation, will solve in the future
-        del os.environ["CUDA_VISIBLE_DEVICES"]
-        if os.environ["ENSURE_CUDA_VISIBLE_DEVICES"]:
-            os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["ENSURE_CUDA_VISIBLE_DEVICES"]
 
         assert not (not config.enforce_eager and
                     config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
@@ -131,9 +125,6 @@ class SGLangRollout(BaseRollout):
         assert (model_hf_config.max_position_embeddings >= config.prompt_length +
                 config.response_length), "model context length should be greater than total sequence length"
 
-        # manually set the mp authkey
-        multiprocessing.current_process().authkey = b'123456'
-
         tp_size = tensor_parallel_size
         world_size = int(os.getenv("WORLD_SIZE", "-1"))
 
@@ -145,10 +136,16 @@ class SGLangRollout(BaseRollout):
         device_mesh_cpu = init_device_mesh("cpu", **device_mesh_kwargs)
         # device_mesh_device = init_device_mesh("cuda", **device_mesh_kwargs)
 
-        # get tp_rank of this process in this tp group
-        global_rank = device_mesh_cpu.get_rank()
-        tp_size = device_mesh_cpu["tp"].mesh.size()[0]
-        src_rank = global_rank // tp_size * tp_size
+        visible_devices = [None] * device_mesh_cpu.size(1)
+        torch.distributed.all_gather_object(visible_devices, os.environ["CUDA_VISIBLE_DEVICES"],
+                                            device_mesh_cpu.get_group("tp"))
+        if tp_size > n_gpus_per_node:
+            assert tp_size % n_gpus_per_node == 0, "tp_size should be divisible by n_gpus_per_node"
+            tp_rank = device_mesh_cpu["tp"].get_local_rank()
+            _node = tp_rank // n_gpus_per_node
+            visible_devices = visible_devices[_node * n_gpus_per_node:(_node + 1) * n_gpus_per_node]
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(visible_devices)
+        print(f"rank={device_mesh_cpu.get_rank()}, set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
 
         self.inference_engine = VerlEngine(
             model_path=actor_module,
@@ -156,7 +153,7 @@ class SGLangRollout(BaseRollout):
             mem_fraction_static=config.gpu_memory_utilization,
             enable_memory_saver=True,
             device_mesh_cpu=device_mesh_cpu["tp"],
-            base_gpu_id=src_rank,
+            base_gpu_id=0,
             gpu_id_step=1,
             # NOTE(Chenyang): if you want to debug the sglang engine
             # please set the following parameters

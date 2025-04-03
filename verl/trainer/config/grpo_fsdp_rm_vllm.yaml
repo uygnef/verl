@@ -137,6 +137,7 @@ reward_model:
     path: ~/models/FsfairX-LLaMA3-RM-v0.1
     external_lib: ${actor_rollout_ref.model.external_lib}
     use_remove_padding: False
+    update_weights_batch_size: 8
     fsdp_config:
       min_num_params: 0
       param_offload: True
@@ -157,6 +158,7 @@ reward_model:
     free_cache_engine: True
     load_format: dummy_dtensor
     tensor_model_parallel_size: 2
+    n_gpus_per_node: ${trainer.n_gpus_per_node}
     max_num_batched_tokens: 8192
     max_num_seqs: 1024
     disable_log_stats: True

@@ -32,7 +32,15 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any, Dict, List, Union
 
+import time
+from pprint import pprint
+
 import numpy as np
+from typing import List
+from contextlib import contextmanager
+
+import ray
+from omegaconf import DictConfig
 import torch
 import torch.distributed
 from omegaconf import DictConfig, OmegaConf
@@ -130,6 +138,7 @@ class vLLMRollout(BaseRollout):
                 "Enable chunked prefill, max_num_batched_tokens is smaller than max_model_len, \
                              please increase max_num_batched_tokens or disable chunked prefill"
             )
+        self.replay_buffer = kwargs.get('replay_buffer', None)
 
         trust_remote_code = kwargs.get("trust_remote_code", False)
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
@@ -210,6 +219,11 @@ class vLLMRollout(BaseRollout):
         for key, value in old_sampling_params_args.items():
             setattr(self.sampling_params, key, value)
 
+    @torch.no_grad()
+    def set_tp_group(self, group):
+        from vllm.distributed import GroupCoordinator
+        self.tp_group: GroupCoordinator = group
+
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
@@ -284,7 +298,15 @@ class vLLMRollout(BaseRollout):
                 lora_requests = [LoRARequest(lora_name=f"{lora_int_id}",lora_int_id=lora_int_id,lora_path="/simon-stub-path")] * batch_size
 
         # users can customize different sampling_params at different run
+        rank = torch.distributed.get_rank()
+        input_shape = vllm_inputs.shape
         with self.update_sampling_params(**kwargs):
+            if self.tp_group.is_first_rank:
+                ray.get(self.replay_buffer.put.remote(vllm_inputs, is_finish=False))
+                vllm_inputs = ray.get(self.replay_buffer.get.remote('generate'))
+
+
+            pprint(f"vllm_inputs: {rank}, len {len(vllm_inputs)}")
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,

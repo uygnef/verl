@@ -14,6 +14,7 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
+
 from verl import DataProto
 import torch
 from verl.utils.reward_score import gsm8k, math
@@ -85,7 +86,7 @@ class RewardManager():
 
 import ray
 import hydra
-from split_monkey_patch import fit
+from split_monkey_patch import fit, generate_sequences
 
 
 @hydra.main(config_path='config', config_name='ppo_trainer_split', version_base=None)
@@ -120,13 +121,15 @@ def main_task(config):
         assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
         from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
         from verl.single_controller.ray import RayWorkerGroup
+        from recipe.partial_rollout.rollout_workers import PartialRolloutWorker
         ray_worker_group_cls = RayWorkerGroup
+        ActorRolloutRefWorker.generate_sequences = generate_sequences
 
-    elif config.actor_rollout_ref.actor.strategy == 'megatron':
-        assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-        from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-        from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-        ray_worker_group_cls = NVMegatronRayWorkerGroup
+    # elif config.actor_rollout_ref.actor.strategy == 'megatron':
+    #     assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+    #     from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
+    #     from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
+    #     ray_worker_group_cls = NVMegatronRayWorkerGroup
 
     else:
         raise NotImplementedError
@@ -135,7 +138,7 @@ def main_task(config):
 
     role_worker_mapping = {
         Role.ActorRolloutRef: ray.remote(ActorRolloutRefWorker),
-        Role.Rollout: ray.remote(CriticWorker),
+        Role.Rollout: ray.remote(PartialRolloutWorker),
     }
 
     # NOTE: initialze two resource pool

@@ -389,7 +389,7 @@ class ActorRolloutRefWorker(Worker):
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
 
-    def _build_rollout(self, trust_remote_code=False):
+    def _build_rollout(self, replay_buffer=None, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
 
         # TODO(sgm): support FSDP hybrid shard for larger model
@@ -433,6 +433,7 @@ class ActorRolloutRefWorker(Worker):
                     model_hf_config=self.actor_model_config,
                     device_mesh=rollout_device_mesh,
                     trust_remote_code=trust_remote_code,
+                    replay_buffer=replay_buffer
                     **lora_kwargs)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
@@ -499,11 +500,12 @@ class ActorRolloutRefWorker(Worker):
         return rollout, rollout_sharding_manager
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
+    def init_model(self, replay_buff=None):
         from verl.workers.actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
+        self.replay_buff = replay_buff
 
         from omegaconf import OmegaConf
 
@@ -563,6 +565,7 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            self.rollout.set_tp_group(self.rollout_sharding_manager.get_tp_group())
 
         if self._is_ref:
             local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
@@ -637,7 +640,7 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: DataProto, replay_buffer=None):
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())
 

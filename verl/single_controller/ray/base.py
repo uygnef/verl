@@ -532,6 +532,13 @@ class RayWorkerGroup(WorkerGroup):
         """
         return self._execute_remote_single_worker(self._workers[0], method_name, *args, **kwargs)
 
+    def execute_rank_last_sync(self, method_name: str, *args, **kwargs):
+        remote_call = getattr(self._workers[-1], method_name)
+        return remote_call.remote(*args, **kwargs)
+
+    def execute_rank_last(self, method_name: str, *args, **kwargs):
+        return self.execute_rank_last_sync(method_name, *args, **kwargs)
+
     def execute_rank_zero(self, method_name: str, *args, **kwargs):
         """Alias for execute_rank_zero_async.
 

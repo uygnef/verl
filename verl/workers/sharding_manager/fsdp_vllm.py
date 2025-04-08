@@ -128,7 +128,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     with FSDP.summon_full_params(self.module, writeback=False):
                         if self.base_sync_done:
                             lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
-                            lora_params = {name: param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu() 
+                            lora_params = {name: param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu()
                                         for name, param in lora_params.items()}
                         else:
                             model = self.module._fsdp_wrapped_module.base_model.model
@@ -289,3 +289,12 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         self.base_sync_done = True
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
+
+    def get_tp_group(self):
+        if self.tp_size == 1:
+            return None
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
+            group = vllm_ps.get_tensor_model_parallel_group()
+        else:
+            group = vllm_ps.get_tensor_model_parallel_group().device_group
+        return group

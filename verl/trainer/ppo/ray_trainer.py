@@ -38,6 +38,7 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from recipe.partial_rollout.replay_buffer import DistributedReplayBuffer
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
@@ -374,6 +375,8 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
+
+        self.replay_buffer = DistributedReplayBuffer.remote()
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -826,8 +829,8 @@ class RayPPOTrainer:
             self.rm_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_wg = all_wg["actor_rollout"]
-        self.actor_rollout_wg.init_model()
+        self.actor_rollout_wg = all_wg['actor_rollout']
+        self.actor_rollout_wg.init_model(self.replay_buffer)
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False

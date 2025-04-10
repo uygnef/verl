@@ -53,6 +53,22 @@ def init_predefined_dispatch_mode():
     Dispatch.register("DIRECT_ROLLOUT_METHOD")
 
 
+# class Dispatch(Enum):
+#     RANK_ZERO = 0
+#     ONE_TO_ALL = 1
+#     ALL_TO_ALL = 2
+#     MEGATRON_COMPUTE = 3
+#     MEGATRON_PP_AS_DP = 4
+#     MEGATRON_PP_ONLY = 5
+#     MEGATRON_COMPUTE_PROTO = 6
+#     MEGATRON_PP_AS_DP_PROTO = 7
+#     DP_COMPUTE = 8
+#     DP_COMPUTE_PROTO = 9
+#     DP_COMPUTE_PROTO_WITH_FUNC = 10
+#     DP_COMPUTE_METRIC = 11
+#     DP_DISPATCH_ONLY = 12
+
+
 class Execute(DynamicEnum):
     """Enum class defining different execution modes for distributed computation.
 
@@ -351,6 +367,8 @@ def dispatch_dp_compute(worker_group, *args, **kwargs):
         assert isinstance(v, (Tuple, List)) and len(v) == worker_group.world_size
     return args, kwargs
 
+def collect_none_compute_data_proto(worker_group, output):
+    return None
 
 def collect_dp_compute(worker_group, output):
     from verl.single_controller.base.worker_group import WorkerGroup
@@ -399,44 +417,53 @@ def collect_dp_compute_data_proto(worker_group, output):
 # Global registry for dispatch mode.
 DISPATCH_MODE_FN_REGISTRY = {
     Dispatch.ONE_TO_ALL: {
-        "dispatch_fn": dispatch_one_to_all,
-        "collect_fn": collect_all_to_all,
+        'dispatch_fn': dispatch_one_to_all,
+        'collect_fn': collect_all_to_all,
     },
     Dispatch.ALL_TO_ALL: {
-        "dispatch_fn": dispatch_all_to_all,
-        "collect_fn": collect_all_to_all,
+        'dispatch_fn': dispatch_all_to_all,
+        'collect_fn': collect_all_to_all,
     },
     Dispatch.MEGATRON_COMPUTE: {
-        "dispatch_fn": dispatch_megatron_compute,
-        "collect_fn": collect_megatron_compute,
+        'dispatch_fn': dispatch_megatron_compute,
+        'collect_fn': collect_megatron_compute,
     },
     Dispatch.MEGATRON_PP_AS_DP: {
-        "dispatch_fn": dispatch_megatron_pp_as_dp,
-        "collect_fn": collect_megatron_pp_as_dp,
+        'dispatch_fn': dispatch_megatron_pp_as_dp,
+        'collect_fn': collect_megatron_pp_as_dp,
     },
-    Dispatch.MEGATRON_PP_ONLY: {"dispatch_fn": dispatch_one_to_all, "collect_fn": collect_megatron_pp_only},
+    Dispatch.MEGATRON_PP_ONLY: {
+        'dispatch_fn': dispatch_one_to_all,
+        'collect_fn': collect_megatron_pp_only
+    },
     Dispatch.MEGATRON_COMPUTE_PROTO: {
-        "dispatch_fn": dispatch_megatron_compute_data_proto,
-        "collect_fn": collect_megatron_compute_data_proto,
+        'dispatch_fn': dispatch_megatron_compute_data_proto,
+        'collect_fn': collect_megatron_compute_data_proto
     },
     Dispatch.MEGATRON_PP_AS_DP_PROTO: {
-        "dispatch_fn": dispatch_megatron_pp_as_dp_data_proto,
-        "collect_fn": collect_megatron_pp_as_dp_data_proto,
+        'dispatch_fn': dispatch_megatron_pp_as_dp_data_proto,
+        'collect_fn': collect_megatron_pp_as_dp_data_proto
     },
-    Dispatch.DP_COMPUTE: {"dispatch_fn": dispatch_dp_compute, "collect_fn": collect_dp_compute},
+    Dispatch.DP_COMPUTE: {
+        'dispatch_fn': dispatch_dp_compute,
+        'collect_fn': collect_dp_compute
+    },
     Dispatch.DP_COMPUTE_PROTO: {
-        "dispatch_fn": dispatch_dp_compute_data_proto,
-        "collect_fn": collect_dp_compute_data_proto,
+        'dispatch_fn': dispatch_dp_compute_data_proto,
+        'collect_fn': collect_dp_compute_data_proto
+    },
+    Dispatch.DP_DISPATCH_ONLY: {
+        'dispatch_fn': dispatch_dp_compute_data_proto,
+        'collect_fn': collect_none_compute_data_proto
     },
     Dispatch.DP_COMPUTE_PROTO_WITH_FUNC: {
-        "dispatch_fn": dispatch_dp_compute_data_proto_with_func,
-        "collect_fn": collect_dp_compute_data_proto,
+        'dispatch_fn': dispatch_dp_compute_data_proto_with_func,
+        'collect_fn': collect_dp_compute_data_proto
     },
-    Dispatch.DP_COMPUTE_METRIC: {"dispatch_fn": dispatch_dp_compute_data_proto, "collect_fn": collect_dp_compute},
-    Dispatch.DIRECT_ROLLOUT_METHOD: {
-        "dispatch_fn": dummy_direct_rollout_call,
-        "collect_fn": dummy_direct_rollout_call,
-    },
+    Dispatch.DP_COMPUTE_METRIC: {
+        'dispatch_fn': dispatch_dp_compute_data_proto,
+        'collect_fn': collect_dp_compute
+    }
 }
 
 

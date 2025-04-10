@@ -37,8 +37,22 @@ class DistributedReplayBuffer:
         self.finish_queue = Queue()
         self.continue_queue = Queue()
 
-    # def put_batch(self, batch):
+    def put_batch(self, data_list: Any, is_finish: bool) -> None:
+        """
+        将数据放入 Replay Buffer
 
+        Args:
+            data: 要存储的数据
+            is_finish: 数据是否完成（包含 eos）
+        """
+        if is_finish:
+            # 如果是完成的数据，放入 finish 队列
+            self.finish_queue.put_nowait_batch(data_list)
+            # print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
+        else:
+            # 如果是未完成的数据，放入 continue 队列
+            self.continue_queue.put_nowait_batch(data_list)
+            # print(f"rank : put to continue_queue {self.continue_queue.qsize()}", flush=True)
 
     def put(self, data: Any, is_finish: bool) -> None:
         """
@@ -50,7 +64,7 @@ class DistributedReplayBuffer:
         """
         if is_finish:
             # 如果是完成的数据，放入 finish 队列
-            self.finish_queue.put(data)
+            self.finish_queue.put_nowait_batch(data)
             print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
         else:
             # 如果是未完成的数据，放入 continue 队列

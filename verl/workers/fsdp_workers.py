@@ -564,7 +564,7 @@ class ActorRolloutRefWorker(Worker):
             self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
 
         if self._is_rollout:
-            self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            self.rollout, self.rollout_sharding_manager = self._build_rollout(self.replay_buff, trust_remote_code=self.config.model.get("trust_remote_code", False))
             self.rollout.set_tp_group(self.rollout_sharding_manager.get_tp_group())
 
         if self._is_ref:

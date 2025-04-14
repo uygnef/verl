@@ -317,26 +317,23 @@ class vLLMRollout(BaseRollout):
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
 
-            response = []
-            rollout_log_probs = []
-            for output in outputs:
-                for sample_id in range(len(output.outputs)):
-                    response_ids = output.outputs[sample_id].token_ids
-                    response.append(response_ids)
-                    curr_log_prob = []
-                    for i, logprob in enumerate(output.outputs[sample_id].logprobs):
-                        curr_log_prob.append(logprob[response_ids[i]].logprob)
-                    rollout_log_probs.append(curr_log_prob)
 
-            response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
-            rollout_log_probs = pad_2d_list_to_length(rollout_log_probs, -1, max_length=self.config.response_length).to(idx.device)
-            rollout_log_probs = rollout_log_probs.to(torch.float32)
+            if self.tp_group.is_first_rank:  # rollout tp first rank put data to replay buffer
+                finish_response, continue_response, finish_response_idx, continue_response_idx = self.replay_buffer_preprocess(
+                    outputs, eos_token_id,
+                    idx, attention_mask,
+                    position_ids)
+
+            response = pad_2d_list_to_length(finish_response, self.pad_token_id,
+                                             max_length=self.config.response_length).to(idx.device)
 
             if self.sampling_params.n > 1 and do_sample:
-                idx = _repeat_interleave(idx, self.sampling_params.n)
-                attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
-                position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
-                batch_size = batch_size * self.sampling_params.n
+                idx = _repeat_interleave(idx, self.sampling_params.n)[finish_response_idx]
+                attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)[finish_response_idx]
+                position_ids = _repeat_interleave(position_ids, self.sampling_params.n)[finish_response_idx]
+                batch_size = len(finish_response)
+                if "multi_modal_inputs" in non_tensor_batch.keys():
+                    non_tensor_batch["multi_modal_inputs"] = _repeat_interleave(non_tensor_batch["multi_modal_inputs"], self.sampling_params.n)
                 # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
                 if "tools_kwargs" in non_tensor_batch.keys():
                     non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
@@ -364,7 +361,7 @@ class vLLMRollout(BaseRollout):
                 "prompts": idx,
                 "responses": response,
                 "input_ids": seq,  # here input_ids become the whole sentences
-                'rollout_log_probs': rollout_log_probs, # we will recompute old log prob with actor
+                # 'rollout_log_probs': rollout_log_probs, # we will recompute old log prob with actor
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
             },
@@ -381,6 +378,8 @@ class vLLMRollout(BaseRollout):
             and self.config.free_cache_engine
         ):
             self.inference_engine.free_cache_engine()
+
+        ray.get(self.replay_buffer.put_batch.remote(batch, is_finish=True))
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
@@ -449,11 +448,13 @@ class vLLMRollout(BaseRollout):
             }
 
         # users can customize different sampling_params at different run
-        rank = torch.distributed.get_rank()
+
+        if self.tp_group.is_first_rank:
+            ray.get(self.replay_buffer.put.remote(vllm_inputs, is_finish=False))
+            vllm_inputs = ray.get(self.replay_buffer.get.remote('generate'))
+
         with self.update_sampling_params(**kwargs):
-            # if self.tp_group.is_first_rank:
-            #     ray.get(self.replay_buffer.put.remote(vllm_inputs, is_finish=False))
-            #     vllm_inputs = ray.get(self.replay_buffer.get.remote('generate'))
+
             idx = prompts.batch['input_ids']  # (bs, prompt_length)
             # left-padded attention_mask
             attention_mask = prompts.batch['attention_mask']
@@ -467,22 +468,22 @@ class vLLMRollout(BaseRollout):
                 sampling_params=self.sampling_params,
                 use_tqdm=False)
 
-            if self.tp_group.is_first_rank: # rollout tp first rank put data to replay buffer
-                finish_response, continue_response, finish_response_idx, continue_response_idx = self.replay_buffer_preprocess(outputs, eos_token_id,
-                                                                                   idx, attention_mask,
-                                                                                   position_ids, batch_size)
-
-                batch = {
-                        'input_ids': idx[continue_response_idx],
-                        'responses': response,
-                        'input_ids': seq,  # here input_ids become the whole sentences
-                        # 'old_log_probs': log_probs, # we will recompute old log prob with actor
-                        'attention_mask': attention_mask,
-                        'position_ids': position_ids}
-
-
-                ray.get(self.replay_buffer.put_batch.remote(finish_response, is_finish=True))
-                ray.get(self.replay_buffer.put_batch.remote(continue_response, is_finish=False))
+            # if self.tp_group.is_first_rank: # rollout tp first rank put data to replay buffer
+            #     finish_response, continue_response, finish_response_idx, continue_response_idx = self.replay_buffer_preprocess(outputs, eos_token_id,
+            #                                                                        idx, attention_mask,
+            #                                                                        position_ids, batch_size)
+            #
+            #     batch = {
+            #             'input_ids': idx[continue_response_idx],
+            #             'responses': response,
+            #             'input_ids': seq,  # here input_ids become the whole sentences
+            #             # 'old_log_probs': log_probs, # we will recompute old log prob with actor
+            #             'attention_mask': attention_mask,
+            #             'position_ids': position_ids}
+            #
+            #
+            #     ray.get(self.replay_buffer.put_batch.remote(finish_response, is_finish=True))
+            #     ray.get(self.replay_buffer.put_batch.remote(continue_response, is_finish=False))
 
             response = []
             for output in outputs:
@@ -491,16 +492,6 @@ class vLLMRollout(BaseRollout):
 
             response = pad_2d_list_to_length(response, self.pad_token_id,
                                              max_length=self.config.response_length).to(idx.device)
-
-            if self.sampling_params.n > 1 and do_sample:
-                idx = _repeat_interleave(idx, self.sampling_params.n)
-                attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
-                position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
-                batch_size = batch_size * self.sampling_params.n
-                if 'multi_modal_inputs' in non_tensor_batch.keys():
-                    non_tensor_batch['multi_modal_inputs'] = _repeat_interleave(
-                        non_tensor_batch['multi_modal_inputs'],
-                        self.sampling_params.n)
 
             seq = torch.cat([idx, response], dim=-1)
 
@@ -538,7 +529,7 @@ class vLLMRollout(BaseRollout):
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
     @torch.no_grad()
-    def replay_buffer_preprocess(self, outputs, eos_token_id):
+    def replay_buffer_preprocess(self, outputs, eos_token_id, idx, attention_mask, position_ids, batch_size):
         finish_response = []
         finish_response_ids = []
 
@@ -556,6 +547,24 @@ class vLLMRollout(BaseRollout):
                     continue_response_ids.append(sample_id)
 
         return finish_response, continue_response, finish_response_ids, continue_response_ids
+
+    @torch.no_grad()
+    def preprocess_continue_respond(self, respond, attention_mask, position_ids):
+        pass
+
+    @torch.no_grad()
+    def put_replay_buffer(self, outputs, eos_token_id,
+                            idx, attention_mask,
+                            position_ids):
+        if self.tp_group.is_first_rank:  # rollout tp first rank put data to replay buffer
+            finish_response, continue_response, finish_response_idx, continue_response_idx = self.replay_buffer_preprocess(
+                outputs, eos_token_id,
+                idx, attention_mask,
+                position_ids)
+
+            ray.get(self.replay_buffer.put_batch.remote(finish_response, is_finish=True))
+            ray.get(self.replay_buffer.put_batch.remote(continue_response, is_finish=False))
+
 
 class vLLMAsyncRollout:
     """vLLMAsyncRollout is a thin wrapper of WorkerWrapperBase,

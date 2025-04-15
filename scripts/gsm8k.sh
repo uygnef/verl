@@ -6,7 +6,8 @@ export TMPDIR=/tmp-data
 output_dir=/nfs/ofs-llm-ssd/user/fengyu/models/Qwen2.5-7B-grpo-ori
 cd /nfs/ofs-llab-volume/users/fengyu/new_verl/verl
 
-python3 -m verl.trainer.main_ppo  --config-name='ppo_trainer.yaml' \
+ray job submit --address="http://127.0.0.1:8265" \
+    -- python3 -m verl.trainer.main_ppo  --config-name='ppo_trainer.yaml' \
     algorithm.adv_estimator=grpo \
     data.train_files=/nfs/ofs-llab-volume/users/fengyu/data/train.parquet \
     data.val_files=/nfs/ofs-llab-volume/users/fengyu/data/test.parquet \

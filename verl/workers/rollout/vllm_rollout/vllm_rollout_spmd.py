@@ -211,7 +211,7 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
-        self.rollout_device_mesh = kwargs['rollout_device_mesh']
+        # self.rollout_device_mesh = kwargs['rollout_device_mesh']
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -302,7 +302,7 @@ class vLLMRollout(BaseRollout):
             }
         else:
             # TODO: auto adjust
-            kwargs['max_tokens'] = 4000
+            kwargs['max_tokens'] = 100
 
         lora_requests = None
         if self.lora_kwargs:
@@ -339,7 +339,7 @@ class vLLMRollout(BaseRollout):
                         response.append(output.outputs[sample_id].token_ids)
                 # put finish to queue
                 self.put_finish_data(response, finish_response_idx, idx,
-                                     attention_mask, position_ids, eos_token_id, do_sample)
+                                     attention_mask, position_ids, eos_token_id)
 
                 # put unfinish to queue
                 self.put_continue_data(response, finish_response_idx, idx, attention_mask, position_ids)

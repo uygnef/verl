@@ -90,7 +90,7 @@ class DistributedReplayBuffer:
                 else:
                     data = self.continue_queue.get(timeout=20)
             except Exception as e:
-                print("EXCEPTION", flush=True)
+                print(f"EXCEPTION {e}", flush=True)
                 continue
         return data
 

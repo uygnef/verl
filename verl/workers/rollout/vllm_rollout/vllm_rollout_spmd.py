@@ -325,7 +325,6 @@ class vLLMRollout(BaseRollout):
             )
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
-
             if self.sampling_params.n > 1 and do_sample:
                 idx = _repeat_interleave(idx, self.sampling_params.n)
                 attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
@@ -354,10 +353,10 @@ class vLLMRollout(BaseRollout):
             and self.config.free_cache_engine
         ):
             self.inference_engine.free_cache_engine()
-
-        batch = ray.get(self.replay_buffer.get.remote('generate'))
-        print(f"finsih batch is {batch}")
-
+        if self.tp_group.is_first_rank: 
+            batch = ray.get(self.replay_buffer.get.remote('actor_update'))
+            print(f"finsih batch is {batch}")
+        print("finish")
     # @torch.no_grad()
     # def partial_generate_sequences(self, ):
     #     # rebuild vllm cache engine
@@ -443,18 +442,24 @@ class vLLMRollout(BaseRollout):
                     finish_response_ids.append(sample_id)
         return finish_response_ids
 
+    def get_items_by_index(self, data_list, index, reverse=False):
+        if reverse: # get item not in index
+            return [item for i, item in enumerate(data_list) if i not in index]
+        else:
+            return [data_list[i] for i in index]
+
     @torch.no_grad()
     def put_finish_data(self, response, finish_response_idx, idx, attention_mask, position_ids,
                            eos_token_id):
-        response = pad_2d_list_to_length(response[finish_response_idx], self.pad_token_id,
-                                         max_length=self.config.response_length).to(idx.device)
+        response = pad_2d_list_to_length(self.get_items_by_index(response, finish_response_idx), self.pad_token_id,
+                                         max_length=self.config.response_length
         idx = idx[finish_response_idx]
         attention_mask = attention_mask[finish_response_idx]
         position_ids = position_ids[finish_response_idx]
         batch_size = len(finish_response_idx)
 
         response_length = response.size(1)
-        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = torch.arange(1, response_length + 1, device=idx.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
 
         # TODO(sgm): fix position_ids on right_pad
@@ -476,12 +481,15 @@ class vLLMRollout(BaseRollout):
                 'position_ids': position_ids
         }
         ray.get(self.replay_buffer.put.remote(batch, is_finish=True))
+        ray.get(self.replay_buffer.empty.remote())
+        print("finish put success")
 
     @torch.no_grad()
-    def put_continue_data(self, responses, continue_idx, idx, attention_mask, position_ids):
-        idx = idx[continue_idx]
-        attention_mask = attention_mask[continue_idx]
-        position_ids = position_ids[continue_idx]
+    def put_continue_data(self, responses, finish_idx, idx, attention_mask, position_ids):
+
+        idx = self.get_items_by_index(idx, finish_idx, reverse=True)
+        attention_mask = self.get_items_by_index(attention_mask, finish_idx, reverse=True)
+        position_ids = self.get_items_by_index(position_ids, finish_idx, reverse=True)
         raw_prompt_ids = []
 
         for prompt, response in zip(idx, responses):

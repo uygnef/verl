@@ -659,9 +659,9 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
-            output = self.rollout_sharding_manager.postprocess_data(output)
+            # output = self.rollout_sharding_manager.postprocess_data(output)
 
-        output = output.to("cpu")
+        # output = output.to("cpu")
 
         # clear kv cache
         get_torch_device().empty_cache()

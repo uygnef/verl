@@ -47,11 +47,11 @@ class DistributedReplayBuffer:
         """
         if is_finish:
             # 如果是完成的数据，放入 finish 队列
-            self.finish_queue.put_nowait_batch(data_list)
+            self.finish_queue.put_nowait(data_list)
             # print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
         else:
             # 如果是未完成的数据，放入 continue 队列
-            self.continue_queue.put_nowait_batch(data_list)
+            self.continue_queue.put_nowait(data_list)
             # print(f"rank : put to continue_queue {self.continue_queue.qsize()}", flush=True)
 
     def put(self, data: Any, is_finish: bool) -> None:
@@ -64,14 +64,14 @@ class DistributedReplayBuffer:
         """
         if is_finish:
             # 如果是完成的数据，放入 finish 队列
-            self.finish_queue.put_nowait_batch(data)
+            self.finish_queue.put_nowait(data)
             print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
         else:
             # 如果是未完成的数据，放入 continue 队列
-            self.continue_queue.put(data)
+            self.continue_queue.put_nowait(data)
             print(f"rank : put to continue_queue {self.continue_queue.qsize()}", flush=True)
 
-    def get(self, consumer_type: str, batch_size: int=1) -> Optional[Any]:
+    def get(self, consumer_type: str, batch_size: int = 1) -> Optional[Any]:
         """
         从 Replay Buffer 中获取数据
 
@@ -81,11 +81,38 @@ class DistributedReplayBuffer:
         Returns:
             数据，如果没有数据则返回 None
         """
-        if consumer_type == "actor_update":
-            data = self.finish_queue.get(timeout=20)
-        else:
-            data = self.continue_queue.get(timeout=20)
-        return data
+        current_size = 0
+        result_data = None
+        queue = self.finish_queue if consumer_type == "actor_update" else self.continue_queue
+
+        while batch_size > current_size:
+            try:
+                # Get data from the appropriate queue with timeout
+                data = queue.get(timeout=20)
+
+                # Get the actual batch size of the retrieved data
+                data_size = len(data) if hasattr(data, '__len__') else 1
+
+                if result_data is None:
+                    result_data = data
+                    current_size = data_size
+                else:
+                    # Concatenate the new data with existing result
+                    result_data = torch.cat([result_data, data], dim=0)
+                    current_size += data_size
+            except queue.Empty:
+                # Timeout occurred, return what we have (might be None or partial batch)
+                break
+
+        # If we collected more than needed, split and return excess to queue
+        if current_size > batch_size and result_data is not None:
+            excess = result_data[batch_size:]
+            result_data = result_data[:batch_size]
+
+            # Return excess data to the original queue
+            queue.put_nowait(excess)
+
+        return result_data
 
 
     # def get(self, consumer_type: str, batch_size: int=1) -> Optional[Any]:

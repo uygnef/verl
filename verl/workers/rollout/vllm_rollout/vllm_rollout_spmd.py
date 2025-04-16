@@ -110,7 +110,7 @@ class vLLMRollout(BaseRollout):
         assert tensor_parallel_size <= torch.distributed.get_world_size(), "tensor parallel size should be less than or equal to the world size"
         max_num_batched_tokens = self.config.get("max_num_batched_tokens", 8192)
 
-        if kwargs.get("train_tp") is not None:
+        if kwargs.get("train_tp", None) is not None:
             # deployed with megatron
             import os
 
@@ -331,7 +331,7 @@ class vLLMRollout(BaseRollout):
                 position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
 
             if self.tp_group.is_first_rank:  # rollout tp first rank put data to replay buffer
-                finish_response_idx = self.get_finish_index(outputs, eos_token_id)
+                finish_response_idx, continue_respond_idx = self.get_finish_index(outputs, eos_token_id)
                 response = []
                 for output in outputs:
                     for sample_id in range(len(output.outputs)):
@@ -341,7 +341,7 @@ class vLLMRollout(BaseRollout):
                                      attention_mask, position_ids, eos_token_id)
 
                 # put unfinish to queue
-                self.put_continue_data(response, finish_response_idx, idx, attention_mask, position_ids)
+                self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids)
 
         # free vllm cache engine
         if (
@@ -434,13 +434,15 @@ class vLLMRollout(BaseRollout):
     @torch.no_grad()
     def get_finish_index(self, outputs, eos_token_id):
         finish_response_ids = []
-
+        continue_response_ids = []
         for output in outputs:
             for sample_id in range(len(output.outputs)):
                 current_respond = output.outputs[sample_id].token_ids
                 if current_respond[-1] == eos_token_id: # if respond is finish
                     finish_response_ids.append(sample_id)
-        return finish_response_ids
+                else:
+                    continue_response_ids.append(sample_id)
+        return finish_response_ids, continue_response_ids
 
     def get_items_by_index(self, data_list, index, reverse=False):
         if reverse: # get item not in index
@@ -452,7 +454,7 @@ class vLLMRollout(BaseRollout):
     def put_finish_data(self, response, finish_response_idx, idx, attention_mask, position_ids,
                            eos_token_id):
         response = pad_2d_list_to_length(self.get_items_by_index(response, finish_response_idx), self.pad_token_id,
-                                         max_length=self.config.response_length
+                                         max_length=self.config.response_length)
         idx = idx[finish_response_idx]
         attention_mask = attention_mask[finish_response_idx]
         position_ids = position_ids[finish_response_idx]
@@ -469,38 +471,35 @@ class vLLMRollout(BaseRollout):
         response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_eos_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
-        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-        seq = torch.cat([idx, response], dim=-1)
+        attention_mask = torch.cat((attention_mask.cpu(), response_attention_mask.cpu()), dim=-1)
+        seq = torch.cat([idx.cpu(), torch.tensor(response)], dim=-1)
         # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = {
-                'prompts': idx,
-                'responses': response,
-                'input_ids': seq,  # here input_ids become the whole sentences
+
+        batch = TensorDict({
+                'prompts': idx.cpu(),
+                'responses': response.cpu(),
+                'input_ids': seq.cpu(),  # here input_ids become the whole sentences
                 # 'old_log_probs': log_probs, # we will recompute old log prob with actor
-                'attention_mask': attention_mask,
-                'position_ids': position_ids
-        }
+                'attention_mask': attention_mask.cpu(),
+                'position_ids': position_ids.cpu()
+        }, batch_size=batch_size)
         ray.get(self.replay_buffer.put.remote(batch, is_finish=True))
         ray.get(self.replay_buffer.empty.remote())
         print("finish put success")
 
     @torch.no_grad()
-    def put_continue_data(self, responses, finish_idx, idx, attention_mask, position_ids):
-
-        idx = self.get_items_by_index(idx, finish_idx, reverse=True)
-        attention_mask = self.get_items_by_index(attention_mask, finish_idx, reverse=True)
-        position_ids = self.get_items_by_index(position_ids, finish_idx, reverse=True)
-        raw_prompt_ids = []
-
-        for prompt, response in zip(idx, responses):
-            # Track active requests and their original indices
-            raw_prompt_ids.append(prompt+response)
-        data = {
+    def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids):
+        idx = idx[continue_respond_idx]
+        attention_mask = attention_mask[continue_respond_idx]
+        position_ids = position_ids[continue_respond_idx]
+        responses = self.get_items_by_index(responses, continue_respond_idx)
+        raw_prompt_ids = torch.cat([idx.cpu(), torch.tensor(responses)], axis=1)
+        data = TensorDict({
             'raw_prompt_ids': raw_prompt_ids,
-            'idx': idx,
-            'attention_mask': attention_mask,
-            'position_ids': position_ids,
-        }
+            'idx': idx.cpu(),
+            'attention_mask': attention_mask.cpu(),
+            'position_ids': position_ids.cpu(),
+        }, batch_size=len(continue_respond_idx))
         ray.get(self.replay_buffer.put.remote(data, is_finish=False))
 
 

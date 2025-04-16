@@ -639,7 +639,7 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)
     def generate_sequences(self, prompts: DataProto, replay_buffer=None):
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())

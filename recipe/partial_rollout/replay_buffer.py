@@ -114,30 +114,9 @@ class DistributedReplayBuffer:
 
         return result_data
 
-
-    # def get(self, consumer_type: str, batch_size: int=1) -> Optional[Any]:
-    #     """
-    #     从 Replay Buffer 中获取数据
-    #
-    #     Args:
-    #         consumer_type: 消费者类型，可以是 "actor_update" 或其他类型
-    #         batch_size: 获取的batch size
-    #     Returns:
-    #         数据，如果没有数据则返回 None
-    #     """
-    #     data = None
-    #     while data is None:
-    #         try:
-    #             if consumer_type == "actor_update":
-    #                 data = self.finish_queue.get(timeout=20)
-    #             else:
-    #                 data = self.continue_queue.get(timeout=20)
-    #         except Exception as e:
-    #             print(f"EXCEPTION {e}", flush=True)
-    #             continue
-    #     return data
-
     def empty(self) -> bool:
         return self.continue_queue.empty()
 
 
+    def get_continue_size(self) -> int:
+        return self.continue_queue.qsize()

@@ -54,6 +54,8 @@ from vllm.worker.worker_base import WorkerWrapperBase
 from torch import nn
 from typing import Any, Union
 
+from torch.distributed import DeviceMesh
+
 from recipe.partial_rollout.replay_buffer import DistributedReplayBuffer
 from verl import DataProto
 from verl.utils.torch_functional import get_eos_mask, pad_2d_list_to_length, broadcast_dict_tensor
@@ -148,6 +150,9 @@ class vLLMRollout(BaseRollout):
                              please increase max_num_batched_tokens or disable chunked prefill"
             )
         self.replay_buffer: DistributedReplayBuffer = kwargs.get('replay_buffer', None)
+        self.rollout_device_mesh: DeviceMesh = kwargs['device_mesh']
+        self.is_partial = kwargs.get('is_partial', True)
+
 
         trust_remote_code = kwargs.get("trust_remote_code", False)
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
@@ -211,7 +216,7 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
-        # self.rollout_device_mesh = kwargs['rollout_device_mesh']
+        self.countinue_keys = ['raw_prompt_ids', 'idx', 'attention_mask', 'position_ids']
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -353,82 +358,92 @@ class vLLMRollout(BaseRollout):
             and self.config.free_cache_engine
         ):
             self.inference_engine.free_cache_engine()
-        if self.tp_group.is_first_rank: 
+        else:
+            self.partial_generate_sequences()
+
+        if self.tp_group.is_first_rank:
             batch = ray.get(self.replay_buffer.get.remote('actor_update'))
             print(f"finsih batch is {batch}")
         print("finish")
-    # @torch.no_grad()
-    # def partial_generate_sequences(self, ):
-    #     # rebuild vllm cache engine
-    #     if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
-    #         self.inference_engine.init_cache_engine()
-    #
-    #     # users can customize different sampling_params at different run
-    #     if self.tp_group.is_first_rank:
-    #         batch = ray.get(self.replay_buffer.get.remote('generate'))
-    #         self.broadcast_data_dict(batch)
-    #     else:
-    #         batch = DataProto()
-    #         self.broadcast_data_dict(batch)
-    #
-    #     idx = batch['input_ids']  # (bs, prompt_length)
-    #     # left-padded attention_mask
-    #     attention_mask = batch['attention_mask']
-    #     position_ids = batch['position_ids']
-    #
-    #     # used to construct attention_mask
-    #     eos_token_id = self.eos_token_id
-    #     vllm_inputs = batch['raw_prompt_ids']
-    #     kwargs = {
-    #         'n': 1  # if greedy, only 1 response
-    #     }
-    #
-    #     with self.update_sampling_params(**kwargs):
-    #         outputs = self.inference_engine.generate(
-    #             prompts=vllm_inputs,  # because we have already convert it to prompt token id
-    #             sampling_params=self.sampling_params,
-    #             use_tqdm=False)
-    #
-    #         response = []
-    #         for output in outputs:
-    #             for sample_id in range(len(output.outputs)):
-    #                 response.append(output.outputs[sample_id].token_ids)
-    #
-    #         response = pad_2d_list_to_length(response, self.pad_token_id,
-    #                                          max_length=self.config.response_length).to(idx.device)
-    #
-    #         seq = torch.cat([idx, response], dim=-1)
-    #
-    #     response_length = response.size(1)
-    #     delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
-    #     delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
-    #     if position_ids.dim() == 3:  # qwen2vl mrope
-    #         delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
-    #
-    #     # TODO(sgm): fix position_ids on right_pad
-    #     # prompt: left pad + response: right pad
-    #     # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-    #     # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-    #     response_position_ids = position_ids[:, -1:] + delta_position_id
-    #     position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-    #     response_attention_mask = get_eos_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
-    #     attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-    #
-    #     # all the tp ranks should contain the same data here. data in all ranks are valid
-    #     batch = TensorDict(
-    #         {
-    #             'prompts': idx,
-    #             'responses': response,
-    #             'input_ids': seq,  # here input_ids become the whole sentences
-    #             # 'old_log_probs': log_probs, # we will recompute old log prob with actor
-    #             'attention_mask': attention_mask,
-    #             'position_ids': position_ids
-    #         },
-    #         batch_size=batch_size)
-    #
-    #     # free vllm cache engine
-    #     if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
-    #         self.inference_engine.free_cache_engine()
+
+    @torch.no_grad()
+    def partial_generate_sequences(self, ):
+        # users can customize different sampling_params at different run
+        tp_group = self.rollout_device_mesh['infer_tp'].get_group()
+        dp_group = self.rollout_device_mesh['dp'].get_group()
+        # breakpoint()
+        if self.tp_group.is_first_rank:
+            total_batch = ray.get(self.replay_buffer.get_continue_size.remote())
+            print(f"total batch is {total_batch}")
+            batch_size = total_batch // 2
+            if dp_group.rank() == 0:
+                batch_size += total_batch % 2
+        torch.distributed.barrier()
+
+        if self.tp_group.is_first_rank:
+            batch = ray.get(self.replay_buffer.get.remote('generate'))
+            self.broadcast_data_dict(batch)
+        else:
+            batch = self.broadcast_data_dict()
+
+        idx = batch['input_ids']  # (bs, prompt_length)
+        # left-padded attention_mask
+        attention_mask = batch['attention_mask']
+        position_ids = batch['position_ids']
+
+        # used to construct attention_mask
+        eos_token_id = self.eos_token_id
+        vllm_inputs = batch['raw_prompt_ids']
+        kwargs = {
+            'n': 1,  # if greedy, only 1 response
+            'max_tokens': 300,
+        }
+
+        with self.update_sampling_params(**kwargs):
+            outputs = self.inference_engine.generate(
+                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                sampling_params=self.sampling_params,
+                use_tqdm=False)
+
+            response = []
+            for output in outputs:
+                for sample_id in range(len(output.outputs)):
+                    response.append(output.outputs[sample_id].token_ids)
+
+            response = pad_2d_list_to_length(response, self.pad_token_id,
+                                             max_length=self.config.response_length).to(idx.device)
+
+            seq = torch.cat([idx, response], dim=-1)
+
+        response_length = response.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        if position_ids.dim() == 3:  # qwen2vl mrope
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
+
+        # TODO(sgm): fix position_ids on right_pad
+        # prompt: left pad + response: right pad
+        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
+        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
+        response_position_ids = position_ids[:, -1:] + delta_position_id
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        response_attention_mask = get_eos_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
+        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        # all the tp ranks should contain the same data here. data in all ranks are valid
+        batch = TensorDict(
+            {
+                'prompts': idx,
+                'responses': response,
+                'input_ids': seq,  # here input_ids become the whole sentences
+                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
+                'attention_mask': attention_mask,
+                'position_ids': position_ids
+            },
+            batch_size=batch_size)
+
+        # free vllm cache engine
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
+            self.inference_engine.free_cache_engine()
 
 
     @torch.no_grad()
@@ -503,12 +518,35 @@ class vLLMRollout(BaseRollout):
         ray.get(self.replay_buffer.put.remote(data, is_finish=False))
 
 
-    def broadcast_data_dict(self, data):
-        global_rank = self.rollout_device_mesh.get_rank()
-        tp_rank = self.rollout_device_mesh["infer_tp"].get_local_rank()
-        tp_size = self.rollout_device_mesh["infer_tp"].mesh.size()[0]
-        src_rank = global_rank // tp_size * tp_size
-        broadcast_dict_tensor(data.batch, src=src_rank, group=self.rollout_device_mesh["infer_tp"].get_group())
+    def broadcast_data_dict(self, data=None):
+        tp_group = self.rollout_device_mesh["infer_tp"].get_group()
+        print(f"tp group",tp_group )
+        src_rank = self.tp_group.first_rank
+        if data is not None:
+            result = []
+            for key in self.countinue_keys:
+                print(f"key {key}, type: {data[key].type()}")
+                result.append(data[key].shape)
+            tensor_shape = torch.tensor(result)
+            print(f"src rank {torch.distributed.get_rank()} / {src_rank} tensor_shape type {tensor_shape.dtype} tensor {tensor_shape}")
+
+            self._communicate_shapes(src_rank, tensor_shape)
+        else:
+            tensor_shape = self._communicate_shapes(src_rank)
+            data = {}
+            for name, shape in zip(self.countinue_keys, tensor_shape.tolist()):
+                data[name] = torch.empty(shape, dtype=torch.long)
+            data = TensorDict(data)
+        print("start ")
+        broadcast_dict_tensor(data, src=src_rank, group=self.rollout_device_mesh["infer_tp"].get_group())
+        return data
+
+    def _communicate_shapes(self, src_rank, tensor_send=None):
+        if not isinstance(tensor_send, torch.Tensor):
+            tensor_send = torch.empty(size=(4, 2), dtype=torch.long)
+            print(f"dst rank {torch.distributed.get_rank()}/ {src_rank} tensor_shape {tensor_send.shape} tensor {tensor_send}")
+        torch.distributed.broadcast(tensor_send, src=src_rank, group=self.rollout_device_mesh["infer_tp"].get_group())
+        return tensor_send
 
 class vLLMAsyncRollout:
     """vLLMAsyncRollout is a thin wrapper of WorkerWrapperBase,

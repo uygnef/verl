@@ -374,11 +374,10 @@ class vLLMRollout(BaseRollout):
         # breakpoint()
         if self.tp_group.is_first_rank:
             total_batch = ray.get(self.replay_buffer.get_continue_size.remote())
-            print(f"total batch is {total_batch}")
             batch_size = total_batch // 2
             if dp_group.rank() == 0:
                 batch_size += total_batch % 2
-        torch.distributed.barrier()
+        torch.distributed.barrier() # for consistant
 
         if self.tp_group.is_first_rank:
             batch = ray.get(self.replay_buffer.get.remote('generate'))
@@ -386,61 +385,34 @@ class vLLMRollout(BaseRollout):
         else:
             batch = self.broadcast_data_dict()
 
-        idx = batch['input_ids']  # (bs, prompt_length)
+        idx = batch['idx']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = batch['attention_mask']
         position_ids = batch['position_ids']
 
         # used to construct attention_mask
         eos_token_id = self.eos_token_id
-        vllm_inputs = batch['raw_prompt_ids']
+        vllm_inputs = batch['raw_prompt_ids'].tolist()
+        prompt_token_ids = []
+        for input_data in vllm_inputs:
+            input_tensor = torch.tensor(input_data)
+            mask = input_tensor != self.eos_token_id
+            prompt_token_ids.append({'prompt_token_ids': input_tensor[mask]})
+
+        torch.distributed.barrier()
         kwargs = {
             'n': 1,  # if greedy, only 1 response
-            'max_tokens': 300,
+            'max_tokens': 1000,
         }
 
         with self.update_sampling_params(**kwargs):
-            outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+            response = self.inference_engine.generate(
+                prompts=prompt_token_ids,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
                 use_tqdm=False)
-
-            response = []
-            for output in outputs:
-                for sample_id in range(len(output.outputs)):
-                    response.append(output.outputs[sample_id].token_ids)
-
-            response = pad_2d_list_to_length(response, self.pad_token_id,
-                                             max_length=self.config.response_length).to(idx.device)
-
-            seq = torch.cat([idx, response], dim=-1)
-
-        response_length = response.size(1)
-        delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
-        delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
-        if position_ids.dim() == 3:  # qwen2vl mrope
-            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
-
-        # TODO(sgm): fix position_ids on right_pad
-        # prompt: left pad + response: right pad
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-        response_position_ids = position_ids[:, -1:] + delta_position_id
-        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        response_attention_mask = get_eos_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
-        attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-        # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = TensorDict(
-            {
-                'prompts': idx,
-                'responses': response,
-                'input_ids': seq,  # here input_ids become the whole sentences
-                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
-                'attention_mask': attention_mask,
-                'position_ids': position_ids
-            },
-            batch_size=batch_size)
-
+            finish_response_idx = list(range(len(response)))
+            self.put_finish_data(response, finish_response_idx, idx,
+                                     attention_mask, position_ids, eos_token_id)
         # free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
@@ -529,7 +501,7 @@ class vLLMRollout(BaseRollout):
                 result.append(data[key].shape)
             tensor_shape = torch.tensor(result)
             print(f"src rank {torch.distributed.get_rank()} / {src_rank} tensor_shape type {tensor_shape.dtype} tensor {tensor_shape}")
-
+        
             self._communicate_shapes(src_rank, tensor_shape)
         else:
             tensor_shape = self._communicate_shapes(src_rank)

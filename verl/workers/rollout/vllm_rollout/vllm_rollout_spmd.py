@@ -406,10 +406,14 @@ class vLLMRollout(BaseRollout):
         }
 
         with self.update_sampling_params(**kwargs):
-            response = self.inference_engine.generate(
+            outputs = self.inference_engine.generate(
                 prompts=prompt_token_ids,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
                 use_tqdm=False)
+            response = []
+            for output in outputs:
+                    for sample_id in range(len(output.outputs)):
+                        response.append(output.outputs[sample_id].token_ids)
             finish_response_idx = list(range(len(response)))
             self.put_finish_data(response, finish_response_idx, idx,
                                      attention_mask, position_ids, eos_token_id)

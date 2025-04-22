@@ -6,18 +6,19 @@ export TMPDIR=/tmp-data
 output_dir=/nfs/ofs-llm-ssd/user/fengyu/models/Qwen2.5-7B-grpo-ori
 cd /nfs/ofs-llab-volume/users/fengyu/new_verl/verl
 
-ray job submit --address="http://127.0.0.1:8265" \
-    -- python3 -m verl.trainer.main_ppo  --config-name='ppo_trainer.yaml' \
+# ray job submit --address="http://127.0.0.1:8265" \
+    # -- python3 -m verl.trainer.main_ppo  --config-name='ppo_trainer.yaml' \
+python3 -m verl.trainer.main_ppo  --config-name='ppo_trainer.yaml' \
     algorithm.adv_estimator=grpo \
     data.train_files=/nfs/ofs-llab-volume/users/fengyu/data/train.parquet \
     data.val_files=/nfs/ofs-llab-volume/users/fengyu/data/test.parquet \
     data.train_batch_size=32 \
     data.max_prompt_length=512 \
-    data.max_response_length=10 \
+    data.max_response_length=150 \
     actor_rollout_ref.model.path=/nfs/volume-1615-2/models/Qwen2.5-0.5B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=24000 \
     actor_rollout_ref.actor.use_kl_loss=True \

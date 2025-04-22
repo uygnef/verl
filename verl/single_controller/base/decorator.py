@@ -49,6 +49,7 @@ def init_predefined_dispatch_mode():
     Dispatch.register("DP_COMPUTE_PROTO")
     Dispatch.register("DP_COMPUTE_PROTO_WITH_FUNC")
     Dispatch.register("DP_COMPUTE_METRIC")
+    Dispatch.register("DP_COLLECT_ONLY")
     # This is a special dispatch mode for vllm ExternalRayDistributedExecutor
     Dispatch.register("DIRECT_ROLLOUT_METHOD")
 
@@ -367,6 +368,9 @@ def dispatch_dp_compute(worker_group, *args, **kwargs):
         assert isinstance(v, (Tuple, List)) and len(v) == worker_group.world_size
     return args, kwargs
 
+def dispatch_none_compute_data_proto(worker_group, ):
+    return None
+
 def collect_none_compute_data_proto(worker_group, output):
     return None
 
@@ -463,7 +467,11 @@ DISPATCH_MODE_FN_REGISTRY = {
     Dispatch.DP_COMPUTE_METRIC: {
         'dispatch_fn': dispatch_dp_compute_data_proto,
         'collect_fn': collect_dp_compute
-    }
+    },
+    Dispatch.DP_COLLECT_ONLY: {
+            'dispatch_fn': dispatch_one_to_all,
+            'collect_fn': collect_dp_compute_data_proto
+        },
 }
 
 

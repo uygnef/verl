@@ -5,6 +5,9 @@ import time
 import unittest
 
 import torch
+from tensordict import TensorDict
+
+
 @ray.remote
 class ReplayBufferLock:
     def __init__(self):
@@ -36,8 +39,9 @@ class DistributedReplayBuffer:
         from ray.util.queue import Queue
         self.finish_queue = Queue()
         self.continue_queue = Queue()
+        self.total_samples = 0
 
-    def put_batch(self, data_list: Any, is_finish: bool) -> None:
+    def put_batch(self, data_list: TensorDict, is_finish: bool) -> None:
         """
         将数据放入 Replay Buffer
 
@@ -65,6 +69,8 @@ class DistributedReplayBuffer:
         if is_finish:
             # 如果是完成的数据，放入 finish 队列
             self.finish_queue.put_nowait(data)
+            print(data.batch_size)
+            self.total_samples += list(data.batch_size)[0]
             print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
         else:
             # 如果是未完成的数据，放入 continue 队列
@@ -111,7 +117,8 @@ class DistributedReplayBuffer:
 
             # Return excess data to the original queue
             queue.put_nowait(excess)
-
+        if consumer_type == "actor_update":
+            self.total_samples -= batch_size
         return result_data
 
     def empty(self) -> bool:
@@ -120,3 +127,9 @@ class DistributedReplayBuffer:
 
     def get_continue_size(self) -> int:
         return self.continue_queue.qsize()
+
+    def finish_size(self):
+        return self.finish_queue.qsize()
+
+    def get_sample_nums(self):
+        return self.total_samples

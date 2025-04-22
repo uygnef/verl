@@ -72,6 +72,9 @@ from dataclasses import asdict
 import json
 
 
+import ray
+from codetiming import Timer
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
@@ -700,11 +703,15 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    @register(dispatch_mode=Dispatch.DP_COLLECT_ONLY)
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
+        partial_batch_size = data.meta_info['partial_batch_size']
+        data = DataProto()
+        data.batch = ray.get(self.replay_buff.get.remote('actor_update', partial_batch_size))
+        print(f"data in compute batch size {partial_batch_size}")
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -738,8 +745,9 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
-
+        # fy todo:
+        print(f"compute log ", output)
+        log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

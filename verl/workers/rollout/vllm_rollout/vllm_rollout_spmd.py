@@ -257,6 +257,7 @@ class vLLMRollout(BaseRollout):
         # left-padded attention_mask
         attention_mask = prompts.batch["attention_mask"]
         position_ids = prompts.batch["position_ids"]
+        global_sample_id = prompts.batch["sample_id"]
 
         # used to construct attention_mask
         eos_token_id = prompts.meta_info["eos_token_id"]
@@ -334,6 +335,7 @@ class vLLMRollout(BaseRollout):
                 idx = _repeat_interleave(idx, self.sampling_params.n)
                 attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
                 position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
+                global_sample_id = _repeat_interleave(global_sample_id, self.sampling_params.n)
 
             if self.tp_group.is_first_rank:  # rollout tp first rank put data to replay buffer
                 finish_response_idx, continue_respond_idx = self.get_finish_index(outputs, eos_token_id)
@@ -343,7 +345,7 @@ class vLLMRollout(BaseRollout):
                         response.append(output.outputs[sample_id].token_ids)
                 # put finish to queue
                 self.put_finish_data(response, finish_response_idx, idx,
-                                     attention_mask, position_ids, eos_token_id)
+                                     attention_mask, position_ids, global_sample_id, eos_token_id)
 
                 # put unfinish to queue
                 self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids)
@@ -361,9 +363,9 @@ class vLLMRollout(BaseRollout):
         else:
             self.partial_generate_sequences()
 
-        if self.tp_group.is_first_rank:
-            batch = ray.get(self.replay_buffer.get.remote('actor_update'))
-            print(f"finsih batch is {batch}")
+        # if self.tp_group.is_first_rank:
+        #     batch = ray.get(self.replay_buffer.get.remote('actor_update'))
+        #     print(f"finsih batch is {batch}")
         print("finish")
 
     @torch.no_grad()
@@ -402,7 +404,7 @@ class vLLMRollout(BaseRollout):
         torch.distributed.barrier()
         kwargs = {
             'n': 1,  # if greedy, only 1 response
-            'max_tokens': 1000,
+            'max_tokens': 50,
         }
 
         with self.update_sampling_params(**kwargs):
@@ -416,7 +418,7 @@ class vLLMRollout(BaseRollout):
                         response.append(output.outputs[sample_id].token_ids)
             finish_response_idx = list(range(len(response)))
             self.put_finish_data(response, finish_response_idx, idx,
-                                     attention_mask, position_ids, eos_token_id)
+                                     attention_mask, position_ids, eos_token_id, kwargs['max_tokens'])
         # free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
@@ -442,17 +444,16 @@ class vLLMRollout(BaseRollout):
             return [data_list[i] for i in index]
 
     @torch.no_grad()
-    def put_finish_data(self, response, finish_response_idx, idx, attention_mask, position_ids,
+    def put_finish_data(self, response, finish_response_idx, idx, attention_mask, position_ids, global_sample_id,
                            eos_token_id):
         response = pad_2d_list_to_length(self.get_items_by_index(response, finish_response_idx), self.pad_token_id,
                                          max_length=self.config.response_length)
         idx = idx[finish_response_idx]
+        global_sample_id = global_sample_id[finish_response_idx]
         attention_mask = attention_mask[finish_response_idx]
         position_ids = position_ids[finish_response_idx]
         batch_size = len(finish_response_idx)
-
-        response_length = response.size(1)
-        delta_position_id = torch.arange(1, response_length + 1, device=idx.device)
+        delta_position_id = torch.arange(1, self.config.response_length + 1, device=idx.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
 
         # TODO(sgm): fix position_ids on right_pad
@@ -472,11 +473,11 @@ class vLLMRollout(BaseRollout):
                 'input_ids': seq.cpu(),  # here input_ids become the whole sentences
                 # 'old_log_probs': log_probs, # we will recompute old log prob with actor
                 'attention_mask': attention_mask.cpu(),
-                'position_ids': position_ids.cpu()
+                'position_ids': position_ids.cpu(),
+                'sample_id': global_sample_id,
         }, batch_size=batch_size)
         ray.get(self.replay_buffer.put.remote(batch, is_finish=True))
-        ray.get(self.replay_buffer.empty.remote())
-        print("finish put success")
+        print(f"finish put success: {batch_size}")
 
     @torch.no_grad()
     def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids):

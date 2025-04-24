@@ -216,7 +216,7 @@ class vLLMRollout(BaseRollout):
         self.sampling_params = SamplingParams(**kwargs)
 
         self.pad_token_id = tokenizer.pad_token_id
-        self.countinue_keys = ['raw_prompt_ids', 'idx', 'attention_mask', 'position_ids']
+        self.countinue_keys = ['raw_prompt_ids', 'idx', 'attention_mask', 'position_ids', 'sample_id']
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -348,20 +348,21 @@ class vLLMRollout(BaseRollout):
                                      attention_mask, position_ids, global_sample_id, eos_token_id)
 
                 # put unfinish to queue
-                self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids)
-
-        # free vllm cache engine
-        if (
-            vllm_version
-            in (
-                "0.5.4",
-                "0.6.3",
+                self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
+        if not self.is_partial:
+            # free vllm cache engine
+            if (
+                    vllm_version
+                    in (
+                    "0.5.4",
+                    "0.6.3",
             )
-            and self.config.free_cache_engine
-        ):
-            self.inference_engine.free_cache_engine()
-        else:
-            self.partial_generate_sequences()
+                    and self.config.free_cache_engine
+            ):
+                self.inference_engine.free_cache_engine()
+            else:
+                self.partial_generate_sequences()
+
 
         # if self.tp_group.is_first_rank:
         #     batch = ray.get(self.replay_buffer.get.remote('actor_update'))
@@ -383,6 +384,7 @@ class vLLMRollout(BaseRollout):
 
         if self.tp_group.is_first_rank:
             batch = ray.get(self.replay_buffer.get.remote('generate'))
+            print(f"partial_generate_sequences batch, {batch}")
             self.broadcast_data_dict(batch)
         else:
             batch = self.broadcast_data_dict()
@@ -391,7 +393,7 @@ class vLLMRollout(BaseRollout):
         # left-padded attention_mask
         attention_mask = batch['attention_mask']
         position_ids = batch['position_ids']
-
+        global_sample_id = batch['sample_id']
         # used to construct attention_mask
         eos_token_id = self.eos_token_id
         vllm_inputs = batch['raw_prompt_ids'].tolist()
@@ -418,7 +420,7 @@ class vLLMRollout(BaseRollout):
                         response.append(output.outputs[sample_id].token_ids)
             finish_response_idx = list(range(len(response)))
             self.put_finish_data(response, finish_response_idx, idx,
-                                     attention_mask, position_ids, eos_token_id, kwargs['max_tokens'])
+                                     attention_mask, position_ids, global_sample_id, kwargs['max_tokens'])
         # free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
@@ -437,15 +439,14 @@ class vLLMRollout(BaseRollout):
                     continue_response_ids.append(sample_id)
         return finish_response_ids, continue_response_ids
 
-    def get_items_by_index(self, data_list, index, reverse=False):
-        if reverse: # get item not in index
-            return [item for i, item in enumerate(data_list) if i not in index]
-        else:
-            return [data_list[i] for i in index]
+    def get_items_by_index(self, data_list, index):
+        return [data_list[i] for i in index]
 
     @torch.no_grad()
     def put_finish_data(self, response, finish_response_idx, idx, attention_mask, position_ids, global_sample_id,
                            eos_token_id):
+        if not finish_response_idx:
+            return
         response = pad_2d_list_to_length(self.get_items_by_index(response, finish_response_idx), self.pad_token_id,
                                          max_length=self.config.response_length)
         idx = idx[finish_response_idx]
@@ -474,23 +475,27 @@ class vLLMRollout(BaseRollout):
                 # 'old_log_probs': log_probs, # we will recompute old log prob with actor
                 'attention_mask': attention_mask.cpu(),
                 'position_ids': position_ids.cpu(),
-                'sample_id': global_sample_id,
+                'sample_id': global_sample_id.cpu(),
         }, batch_size=batch_size)
         ray.get(self.replay_buffer.put.remote(batch, is_finish=True))
         print(f"finish put success: {batch_size}")
 
     @torch.no_grad()
-    def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids):
+    def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):
         idx = idx[continue_respond_idx]
         attention_mask = attention_mask[continue_respond_idx]
         position_ids = position_ids[continue_respond_idx]
+        print(f"idx {idx.shape}, responses {len(responses)}, continue_respond_idx {len(continue_respond_idx)}, finish {len(self.get_items_by_index(responses, continue_respond_idx))}")
+
         responses = self.get_items_by_index(responses, continue_respond_idx)
         raw_prompt_ids = torch.cat([idx.cpu(), torch.tensor(responses)], axis=1)
+        global_sample_id = global_sample_id[continue_respond_idx]
         data = TensorDict({
             'raw_prompt_ids': raw_prompt_ids,
             'idx': idx.cpu(),
             'attention_mask': attention_mask.cpu(),
             'position_ids': position_ids.cpu(),
+            'sample_id': global_sample_id.cpu(),
         }, batch_size=len(continue_respond_idx))
         ray.get(self.replay_buffer.put.remote(data, is_finish=False))
 
@@ -502,7 +507,7 @@ class vLLMRollout(BaseRollout):
         if data is not None:
             result = []
             for key in self.countinue_keys:
-                print(f"key {key}, type: {data[key].type()}")
+                print(f"key {key}, type: {data[key].type()}, shape {data[key].shape}")
                 result.append(data[key].shape)
             tensor_shape = torch.tensor(result)
             print(f"src rank {torch.distributed.get_rank()} / {src_rank} tensor_shape type {tensor_shape.dtype} tensor {tensor_shape}")
@@ -520,7 +525,7 @@ class vLLMRollout(BaseRollout):
 
     def _communicate_shapes(self, src_rank, tensor_send=None):
         if not isinstance(tensor_send, torch.Tensor):
-            tensor_send = torch.empty(size=(4, 2), dtype=torch.long)
+            tensor_send = torch.empty(size=(5, 2),dtype=torch.long)
             print(f"dst rank {torch.distributed.get_rank()}/ {src_rank} tensor_shape {tensor_send.shape} tensor {tensor_send}")
         torch.distributed.broadcast(tensor_send, src=src_rank, group=self.rollout_device_mesh["infer_tp"].get_group())
         return tensor_send

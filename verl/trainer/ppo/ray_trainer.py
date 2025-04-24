@@ -975,7 +975,6 @@ class RayPPOTrainer:
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
-
         # add tqdm
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
@@ -1069,7 +1068,10 @@ class RayPPOTrainer:
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+
+                        new_none_tensor_batch = self.databatch_manager.get_none_tensor(old_log_prob.batch, batch.non_tensor_batch)
                         batch = old_log_prob
+                        batch.non_tensor_batch = new_none_tensor_batch
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1222,5 +1224,4 @@ class RayPPOTrainer:
                     return
 
 
-    def data_manager(self):
-        sample_nums = ray.get(self.replay_buffer.get_)
+

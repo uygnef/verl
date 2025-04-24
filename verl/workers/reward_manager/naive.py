@@ -42,8 +42,9 @@ class NaiveRewardManager:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
+        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
         already_print_data_sources = {}
-
+        reward_index = torch.squeeze(data.batch['sample_id']).tolist()
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 

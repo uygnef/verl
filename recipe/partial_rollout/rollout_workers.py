@@ -73,18 +73,42 @@ class PartialRolloutWorker(Worker):
                                                                self.ulysses_sequence_parallel_size)
             self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
 
-    def _build_rollout(self):
+    def _build_rollout(self, replay_buffer=None):
         from torch.distributed.device_mesh import init_device_mesh
         # TODO(sgm): support FSDP hybrid shard for larger model
         infer_tp = self.config.rollout.tensor_model_parallel_size
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f'rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}'
-        rollout_device_mesh = init_device_mesh('cuda', mesh_shape=(dp, infer_tp), mesh_dim_names=['dp', 'infer_tp'])
+        rollout_device_mesh = init_device_mesh('cuda', mesh_shape=(dp, infer_tp), mesh_dim_names=('dp', 'infer_tp'))
         rollout_name = self.config.rollout.name
-        trust_remote_code = self.config.model.get('trust_remote_code', False)
-        self.tokenizer = hf_tokenizer(self.config.model.path, trust_remote_code=trust_remote_code)
-        self.actor_model_config = AutoConfig.from_pretrained(self.config.model.path, trust_remote_code=trust_remote_code)
-        if rollout_name == 'sglang':
+
+        if rollout_name == 'vllm':
+            from verl.workers.rollout.vllm_rollout import vLLMRollout, vllm_mode
+            from verl.workers.sharding_manager import FSDPVLLMShardingManager
+            log_gpu_memory_usage(f'Before building {rollout_name} rollout', logger=None)
+            local_path = copy_to_local(self.config.model.path)
+            self.tokenizer = hf_tokenizer(local_path, trust_remote_code=True)
+            actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=True)
+
+            if vllm_mode == 'spmd':
+                rollout = vLLMRollout(model_path=local_path,
+                                      config=self.config.rollout,
+                                      tokenizer=self.tokenizer,
+                                      model_hf_config=actor_model_config,
+                                      device_mesh=rollout_device_mesh,
+                                      replay_buffer=replay_buffer)
+            else:
+                raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+            log_gpu_memory_usage(f'After building {rollout_name} rollout', logger=None)
+            if torch.distributed.get_world_size() == 1:
+                self.config.rollout.load_format = 'dummy_hf'
+            from verl.workers.sharding_manager.fsdp_sglang import PartialRolloutManager
+            rollout_sharding_manager = PartialRolloutManager(inference_engine=rollout.inference_engine,
+                                                               full_params='hf' in self.config.rollout.load_format,
+                                                               device_mesh=rollout_device_mesh)
+            log_gpu_memory_usage('After building sharding manager', logger=None)
+
+        elif rollout_name == 'sglang':
             from verl.workers.rollout.sglang_rollout import SGLangRollout
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to SGLang's model_runner would check CUDA device capability.
             # However, due to veRL's setting, the main process of ray can not find any CUDA device, which would potentially lead to:
@@ -101,22 +125,22 @@ class PartialRolloutWorker(Worker):
 
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = 'dummy_hf'
-            rollout_sharding_manager = PartialRolloutManager('rollout',
-                                                             inference_engine=rollout.inference_engine,
-                                                             full_params='hf' in self.config.rollout.load_format,
-                                                             device_mesh=rollout_device_mesh)
+            rollout_sharding_manager = PartialRolloutManager(module=self.actor_module_fsdp,
+                                                                 inference_engine=rollout.inference_engine,
+                                                                 model_config=self.actor_model_config,
+                                                                 full_params='hf' in self.config.rollout.load_format,
+                                                                 device_mesh=rollout_device_mesh)
             log_gpu_memory_usage('After building sharding manager', logger=None)
-        else:
-            raise NotImplementedError(f"rollout_name {rollout_name} not implemented for partial rollout.")
+
         return rollout, rollout_sharding_manager
 
-
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         self.rollout, self.rollout_sharding_manager = self._build_rollout()
 
 
-    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def generate_sequences(self, prompts: DataProto):
+    @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)
+    def generate_sequences(self, prompts: DataProto, blocking=False):
         # Support all hardwares
         prompts = prompts.to(torch.cuda.current_device())
 
@@ -130,6 +154,7 @@ class PartialRolloutWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
+
             # after parameters sync with rollout, offload actor model to CPU
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
@@ -137,9 +162,9 @@ class PartialRolloutWorker(Worker):
             output = self.rollout.generate_sequences(prompts=prompts)
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
-            output = self.rollout_sharding_manager.postprocess_data(output)
+            # output = self.rollout_sharding_manager.postprocess_data(output)
 
-        output = output.to('cpu')
+        # output = output.to('cpu')
 
         # clear kv cache
         log_gpu_memory_usage('After recompute log prob', logger=logger)

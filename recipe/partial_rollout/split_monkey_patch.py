@@ -14,18 +14,19 @@
 """
 An naive implementation of split placment example
 """
-import logging
-import os
-from pprint import pprint
-from verl import DataProto
-from verl.trainer.ppo.ray_trainer import compute_advantage, apply_kl_penalty, reduce_metrics, compute_data_metrics, _timer, compute_timing_metrics, AdvantageEstimator
+import uuid
 from copy import deepcopy
+from pprint import pprint
+
 import numpy as np
 import torch
-import uuid
+from tensordict import TensorDict
+from tqdm import tqdm
 
-from verl.utils.debug import log_gpu_memory_usage
-from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu, offload_fsdp_optimizer
+from verl import DataProto
+from verl.trainer.ppo.metric_utils import compute_throughout_metrics
+from verl.trainer.ppo.ray_trainer import compute_advantage, apply_kl_penalty, reduce_metrics, compute_data_metrics, \
+    _timer, compute_timing_metrics, AdvantageEstimator
 
 
 def fit(self):
@@ -55,11 +56,12 @@ def fit(self):
         logger.log(data=val_metrics, step=self.global_steps)
         if self.config.trainer.get('val_only', False):
             return
+    # add tqdm
+    progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
     # we start from step 1
     self.global_steps += 1
     last_val_metrics = None
-
     for epoch in range(self.config.trainer.total_epochs):
         for batch_dict in self.train_dataloader:
             metrics = {}
@@ -68,13 +70,25 @@ def fit(self):
             batch: DataProto = DataProto.from_single_dict(batch_dict)
 
             # pop those keys for generation
-            gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'])
+            if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
+                gen_batch = batch.pop(
+                    batch_keys=['input_ids', 'attention_mask', 'position_ids'],
+                    non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
+                )
+            else:
+                gen_batch = batch.pop(
+                    batch_keys=['input_ids', 'attention_mask', 'position_ids'],
+                    non_tensor_batch_keys=['raw_prompt_ids'],
+                )
+            gen_batch.batch['sample_id'] = torch.unsqueeze(
+                torch.range(0, list(batch.batch.batch_size)[0] - 1, dtype=torch.long), dim=-1)
             is_last_step = self.global_steps >= self.total_training_steps
 
             with _timer('step', timing_raw):
                 # generate a batch
                 with _timer('gen', timing_raw):
-                    gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+
+                    self.actor_rollout_wg.generate_sequences(gen_batch)
 
                 if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                     with _timer('gen_max', timing_raw):
@@ -96,21 +110,33 @@ def fit(self):
                                                          dtype=object)
                 # repeat to align with repeated responses in rollout
                 batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                batch = batch.union(gen_batch_output)
+                # batch = batch.union(gen_batch_output)
 
                 # balance the number of valid tokens on each dp rank.
                 # Note that this breaks the order of data inside the batch.
                 # Please take care when you implement group based adv computation such as GRPO and rloo
-                self._balance_batch(batch, metrics=metrics)
+                # if self.config.trainer.balance_batch:
+                #     self._balance_batch(batch, metrics=metrics)
 
+                batch_size = self.databatch_manager.get_batch(
+                    batch_size=self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+                print(f"get_batch size {batch_size}", )
                 # compute global_valid tokens
-                batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
 
+                # TODO: check this
+                # batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
+                batch.batch = TensorDict({"xx": torch.ones(4, 1)})
+                batch.meta_info['partial_batch_size'] = batch_size
+                print(f"batch info : {batch}")
                 # recompute old_log_probs
                 with _timer('old_log_prob', timing_raw):
                     old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                    batch = batch.union(old_log_prob)
 
+                    new_none_tensor_batch = self.databatch_manager.get_none_tensor(old_log_prob.batch,
+                                                                                   batch.non_tensor_batch)
+                    batch = old_log_prob
+                    batch.non_tensor_batch = new_none_tensor_batch
+                breakpoint()
                 if self.use_reference_policy:
                     # compute reference log_prob
                     with _timer('ref', timing_raw):
@@ -118,19 +144,19 @@ def fit(self):
                         batch = batch.union(ref_log_prob)
 
                 # compute values
-                if self.use_critic:
-                    with _timer('values', timing_raw):
-                        values = self.critic_wg.compute_values(batch)
-                        batch = batch.union(values)
+                # if self.use_critic:
+                #     with _timer('values', timing_raw):
+                #         values = self.critic_wg.compute_values(batch)
+                #         batch = batch.union(values)
 
                 with _timer('adv', timing_raw):
                     # compute scores. Support both model and function-based.
                     # We first compute the scores using reward model. Then, we call reward_fn to combine
                     # the results from reward model and rule-based results.
-                    if self.use_rm:
-                        # we first compute reward model score
-                        reward_tensor = self.rm_wg.compute_rm_score(batch)
-                        batch = batch.union(reward_tensor)
+                    # if self.use_rm:
+                    #     # we first compute reward model score
+                    #     reward_tensor = self.rm_wg.compute_rm_score(batch)
+                    #     batch = batch.union(reward_tensor)
 
                     # we combine with rule-based rm
                     reward_tensor = self.reward_fn(batch)
@@ -154,28 +180,22 @@ def fit(self):
 
                 # update critic
                 if self.use_critic:
-                    with _timer('update_critic_call', timing_raw):
+                    with _timer('update_critic', timing_raw):
                         critic_output = self.critic_wg.update_critic(batch)
+                    critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
+                    metrics.update(critic_output_metrics)
 
                 # implement critic warmup
                 if self.config.trainer.critic_warmup <= self.global_steps:
                     # update actor
-                    with _timer('update_actor_call', timing_raw):
+                    with _timer('update_actor', timing_raw):
                         actor_output = self.actor_rollout_wg.update_actor(batch)
-
-                # NOTE: make sure you set blocking=False in update_actor and update_crtic in the worker class
-                with _timer('update_actor_critic', timing_raw):
-                    critic_output = critic_output.get()
-                    critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
-                    metrics.update(critic_output_metrics)
-
-                    actor_output = actor_output.get()
                     actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                     metrics.update(actor_output_metrics)
 
                 # validate
                 if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
-                        (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
+                        (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                     with _timer('testing', timing_raw):
                         val_metrics: dict = self._validate()
                         if is_last_step:
@@ -183,64 +203,24 @@ def fit(self):
                     metrics.update(val_metrics)
 
                 if self.config.trainer.save_freq > 0 and (is_last_step or \
-                        self.global_steps % self.config.trainer.save_freq == 0):
+                                                          self.global_steps % self.config.trainer.save_freq == 0):
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()
 
             # collect metrics
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
             metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
+            # TODO: implement actual tflpo and theoretical tflpo
+            n_gpus = self.resource_pool_manager.get_n_gpus()
+            metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
             # TODO: make a canonical logger that supports various backend
             logger.log(data=metrics, step=self.global_steps)
 
-            if self.global_steps >= self.total_training_steps:
+            if is_last_step:
                 pprint(f'Final validation metrics: {last_val_metrics}')
+                progress_bar.close()
                 return
 
+            progress_bar.update(1)
             self.global_steps += 1
-
-from verl.single_controller.base.decorator import register, Dispatch
-
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
-
-@register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-def generate_sequences(self, prompts: DataProto):
-    # Support all hardwares
-    prompts = prompts.to(torch.cuda.current_device())
-
-    assert self._is_rollout
-    if self._is_offload_param:
-        load_fsdp_model_to_gpu(self.actor_module_fsdp)
-
-    meta_info = {
-        'eos_token_id':
-            self.generation_config.eos_token_id
-            if self.generation_config is not None else self.tokenizer.eos_token_id,
-        'pad_token_id':
-            self.generation_config.pad_token_id
-            if self.generation_config is not None else self.tokenizer.pad_token_id,
-    }
-    prompts.meta_info.update(meta_info)
-    with self.rollout_sharding_manager:
-
-        # after parameters sync with rollout, offload actor model to CPU
-        if self._is_offload_param:
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
-            offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-
-        log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
-
-        prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-        output = self.rollout.generate_sequences(prompts=prompts)
-        log_gpu_memory_usage('After rollout generation', logger=logger)
-
-        output = self.rollout_sharding_manager.postprocess_data(output)
-
-    output = output.to('cpu')
-
-    # clear kv cache
-    log_gpu_memory_usage('After recompute log prob', logger=logger)
-    return output

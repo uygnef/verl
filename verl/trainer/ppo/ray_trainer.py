@@ -397,6 +397,7 @@ class RayPPOTrainer:
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
         self.validation_generations_logger = ValidationGenerationsLogger()
+        self.partial_rollout = True
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get("lora_rank", 0) > 0
@@ -772,7 +773,6 @@ class RayPPOTrainer:
         2. Worker groups for each role (actor, critic, etc.)
         """
         self.resource_pool_manager.create_resource_pool()
-
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
         # create actor and rollout
@@ -786,6 +786,11 @@ class RayPPOTrainer:
             self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
         else:
             raise NotImplementedError
+
+        if self.partial_rollout:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
+            rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout], config=self.config.actor_rollout_ref)
+            self.resource_pool_to_cls[resource_pool]["rollout"] = rollout_cls
 
         # create critic
         if self.use_critic:
@@ -817,6 +822,7 @@ class RayPPOTrainer:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            print(f"resource_pool {resource_pool}, class_dict {class_dict}")
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, device_name=self.device_name, **wg_kwargs)
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
@@ -833,6 +839,10 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
+
+        if self.partial_rollout:
+            self.rollout_wg = all_wg['rollout']
+            self.rollout_wg.init_model()
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']

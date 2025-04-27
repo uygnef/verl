@@ -151,7 +151,7 @@ class vLLMRollout(BaseRollout):
             )
         self.replay_buffer: DistributedReplayBuffer = kwargs.get('replay_buffer', None)
         self.rollout_device_mesh: DeviceMesh = kwargs['device_mesh']
-        self.is_partial = kwargs.get('is_partial', True)
+        self.is_partial = kwargs.get('is_partial', False)
 
 
         trust_remote_code = kwargs.get("trust_remote_code", False)
@@ -308,7 +308,7 @@ class vLLMRollout(BaseRollout):
             }
         else:
             # TODO: auto adjust
-            kwargs['max_tokens'] = 100
+            kwargs['max_tokens'] = 200
 
         lora_requests = None
         if self.lora_kwargs:
@@ -374,7 +374,6 @@ class vLLMRollout(BaseRollout):
         # users can customize different sampling_params at different run
         tp_group = self.rollout_device_mesh['infer_tp'].get_group()
         dp_group = self.rollout_device_mesh['dp'].get_group()
-        # breakpoint()
         if self.tp_group.is_first_rank:
             total_batch = ray.get(self.replay_buffer.get_continue_size.remote())
             batch_size = total_batch // 2
@@ -420,7 +419,7 @@ class vLLMRollout(BaseRollout):
                         response.append(output.outputs[sample_id].token_ids)
             finish_response_idx = list(range(len(response)))
             self.put_finish_data(response, finish_response_idx, idx,
-                                     attention_mask, position_ids, global_sample_id, kwargs['max_tokens'])
+                                     attention_mask, position_ids, global_sample_id, self.eos_token_id)
         # free vllm cache engine
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
@@ -456,6 +455,10 @@ class vLLMRollout(BaseRollout):
         batch_size = len(finish_response_idx)
         delta_position_id = torch.arange(1, self.config.response_length + 1, device=idx.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
+        if self.is_partial:
+            print(f"partial put finish size {idx.shape}")
+        else:
+            print(f"origin put finish size {idx.shape}")
 
         # TODO(sgm): fix position_ids on right_pad
         # prompt: left pad + response: right pad
@@ -485,8 +488,10 @@ class vLLMRollout(BaseRollout):
         idx = idx[continue_respond_idx]
         attention_mask = attention_mask[continue_respond_idx]
         position_ids = position_ids[continue_respond_idx]
-        print(f"idx {idx.shape}, responses {len(responses)}, continue_respond_idx {len(continue_respond_idx)}, finish {len(self.get_items_by_index(responses, continue_respond_idx))}")
-
+        if self.is_partial:
+            print(f"partial put continue size {idx.shape}")
+        else:
+            print(f"origin put continue size {idx.shape}")
         responses = self.get_items_by_index(responses, continue_respond_idx)
         raw_prompt_ids = torch.cat([idx.cpu(), torch.tensor(responses)], axis=1)
         global_sample_id = global_sample_id[continue_respond_idx]

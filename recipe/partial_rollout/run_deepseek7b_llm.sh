@@ -14,7 +14,7 @@ python3 -m recipe.partial_rollout.main_ppo_partial_rollout \
     data.val_files=/nfs/ofs-llab-volume/users/fengyu/data/test.parquet \
     data.train_batch_size=32 \
     data.max_prompt_length=512 \
-    data.max_response_length=150 \
+    data.max_response_length=250 \
     actor_rollout_ref.model.path=/nfs/volume-1615-2/models/Qwen2.5-0.5B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \

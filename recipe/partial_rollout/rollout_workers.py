@@ -60,6 +60,7 @@ class PartialRolloutWorker(Worker):
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
+        print(f"rollout world size : {world_size}")
         # TODO(sgm): support FSDP hybrid shard for larger model
         self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size)
         # TODO(fengyu): does support ulysses_sequence_parallel_size?
@@ -96,13 +97,14 @@ class PartialRolloutWorker(Worker):
                                       tokenizer=self.tokenizer,
                                       model_hf_config=actor_model_config,
                                       device_mesh=rollout_device_mesh,
-                                      replay_buffer=replay_buffer)
+                                      replay_buffer=replay_buffer,
+                                      is_partial=True)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
             log_gpu_memory_usage(f'After building {rollout_name} rollout', logger=None)
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = 'dummy_hf'
-            from verl.workers.sharding_manager.fsdp_sglang import PartialRolloutManager
+            from verl.workers.sharding_manager.fsdp_vllm import PartialRolloutManager
             rollout_sharding_manager = PartialRolloutManager(inference_engine=rollout.inference_engine,
                                                                full_params='hf' in self.config.rollout.load_format,
                                                                device_mesh=rollout_device_mesh)
@@ -139,8 +141,8 @@ class PartialRolloutWorker(Worker):
         self.rollout, self.rollout_sharding_manager = self._build_rollout()
 
 
-    @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)
-    def generate_sequences(self, prompts: DataProto, blocking=False):
+    @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY, blocking=False)
+    def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         prompts = prompts.to(torch.cuda.current_device())
 
@@ -154,18 +156,13 @@ class PartialRolloutWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
-
             # after parameters sync with rollout, offload actor model to CPU
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            output = self.rollout.generate_sequences(prompts=prompts)
+            self.rollout.generate_sequences(prompts=prompts)
             log_gpu_memory_usage('After rollout generation', logger=logger)
-
-            # output = self.rollout_sharding_manager.postprocess_data(output)
-
-        # output = output.to('cpu')
 
         # clear kv cache
         log_gpu_memory_usage('After recompute log prob', logger=logger)
-        return output
+        return True

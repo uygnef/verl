@@ -112,7 +112,7 @@ class TaskRunner:
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
             Role.RefPolicy: ray.remote(ActorRolloutRefWorker),
-            Role.Rollout: ray.remote(PartialRolloutWorker),
+            Role.Rollout: ray.remote(ActorRolloutRefWorker),
         }
 
         # NOTE: initialze two resource pool

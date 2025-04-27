@@ -437,6 +437,8 @@ class ActorRolloutRefWorker(Worker):
                     device_mesh=rollout_device_mesh,
                     trust_remote_code=trust_remote_code,
                     replay_buffer=replay_buffer
+                    replay_buffer=replay_buffer,
+                    is_partial= self.role == 'rollout'
                     **lora_kwargs)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
@@ -669,6 +671,48 @@ class ActorRolloutRefWorker(Worker):
         # clear kv cache
         get_torch_device().empty_cache()
         return output
+        torch.cuda.empty_cache()
+        return True
+
+    @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY, blocking=False)
+    def generate_sequences_partial(self, prompts: DataProto):
+        # Support all hardwares
+        prompts = prompts.to(torch.cuda.current_device())
+
+        assert self._is_rollout
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        meta_info = {
+            'eos_token_id':
+                self.generation_config.eos_token_id
+                if self.generation_config is not None else self.tokenizer.eos_token_id,
+            'pad_token_id':
+                self.generation_config.pad_token_id
+                if self.generation_config is not None else self.tokenizer.pad_token_id,
+        }
+        prompts.meta_info.update(meta_info)
+        with self.rollout_sharding_manager:
+
+            # after parameters sync with rollout, offload actor model to CPU
+            if self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            if self._is_offload_optimizer:
+                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
+
+            log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
+
+            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            self.rollout.generate_sequences(prompts=prompts)
+            log_gpu_memory_usage('After rollout generation', logger=logger)
+
+            # output = self.rollout_sharding_manager.postprocess_data(output)
+
+        # output = output.to('cpu')
+
+        # clear kv cache
+        log_gpu_memory_usage('After recompute log prob', logger=logger)
+        return True
 
 
     @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)

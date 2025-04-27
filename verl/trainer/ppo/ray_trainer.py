@@ -789,7 +789,7 @@ class RayPPOTrainer:
 
         if self.partial_rollout:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
-            rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout], config=self.config.actor_rollout_ref)
+            rollout_cls = RayClassWithInitArgs(cls=self.role_worker_mapping[Role.Rollout], config=self.config.actor_rollout_ref, role='rollout')
             self.resource_pool_to_cls[resource_pool]["rollout"] = rollout_cls
 
         # create critic
@@ -842,7 +842,7 @@ class RayPPOTrainer:
 
         if self.partial_rollout:
             self.rollout_wg = all_wg['rollout']
-            self.rollout_wg.init_model()
+            self.rollout_wg.init_model(self.replay_buffer)
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']

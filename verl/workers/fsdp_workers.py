@@ -439,8 +439,8 @@ class ActorRolloutRefWorker(Worker):
                     replay_buffer=replay_buffer
                     replay_buffer=replay_buffer,
                     is_partial= self.role == 'rollout'
-                    **lora_kwargs)
-            else:
+                                ** lora_kwargs)
+                else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)

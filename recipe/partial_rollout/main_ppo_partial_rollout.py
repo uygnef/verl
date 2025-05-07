@@ -14,6 +14,7 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
+from verl.single_controller.ray.base import merge_resource_pool
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 
 import os
@@ -94,9 +95,8 @@ class TaskRunner:
         # define worker classes
         if config.actor_rollout_ref.actor.strategy == 'fsdp':
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker
             from verl.single_controller.ray import RayWorkerGroup
-            from recipe.partial_rollout.rollout_workers import PartialRolloutWorker
 
             ray_worker_group_cls = RayWorkerGroup
         # elif config.actor_rollout_ref.actor.strategy == 'megatron':
@@ -118,7 +118,7 @@ class TaskRunner:
         # NOTE: initialze two resource pool
         actor_rollout_ref_pool_id = 'actor_rollout_ref_pool'
         partial_rollout_pool_id = 'partial_rollout_pool'
-        # assert config.trainer.nnodes > 1, f'partial rollout need n_node > 1, now is {config.trainer.nnodes}'
+        assert config.trainer.nnodes > 1, f'partial rollout need n_node > 1, now is {config.trainer.nnodes}'
         if config.trainer.nnodes // 2 == 0 and config.trainer.n_gpus_per_node // 2 > 0:
             resource_pool_spec = {
                 actor_rollout_ref_pool_id: [config.trainer.n_gpus_per_node // 2] * config.trainer.nnodes,
@@ -129,12 +129,12 @@ class TaskRunner:
                 actor_rollout_ref_pool_id: [config.trainer.n_gpus_per_node] * (config.trainer.nnodes // 2),
                 partial_rollout_pool_id: [config.trainer.n_gpus_per_node] * (config.trainer.nnodes // 2),
             }
-        print(f'resource_pool_spec: {resource_pool_spec}')
+
+
         mapping = {
             Role.ActorRollout: actor_rollout_ref_pool_id,
             Role.Rollout: partial_rollout_pool_id,
             Role.RefPolicy: actor_rollout_ref_pool_id,
-
         }
 
         # we should adopt a multi-source reward function here

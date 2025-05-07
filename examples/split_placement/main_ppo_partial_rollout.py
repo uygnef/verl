@@ -141,6 +141,7 @@ def main_task(config):
     # NOTE: initialze two resource pool
     actor_rollout_ref_pool_id = 'actor_rollout_ref_pool'
     partial_rollout_pool_id = 'partial_rollout_pool'
+    merged_pool_id = 'merged_pool'
     assert config.trainer.nnodes > 1, f'partial rollout need n_node > 1, now is {config.trainer.nnodes}'
     if config.trainer.nnodes // 2 == 0 and config.trainer.n_gpus_per_node // 2 > 0:
         resource_pool_spec = {

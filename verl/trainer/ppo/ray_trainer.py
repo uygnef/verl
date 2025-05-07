@@ -82,6 +82,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    SyncWeight = 7
 
 
 class AdvantageEstimator(str, Enum):
@@ -847,6 +848,11 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model(self.replay_buffer)
+        master_address, master_port = self.actor_rollout_wg.get_master_addr_port()
+        print(f"update weight group init for master {master_address}:{master_port}")
+        self.actor_rollout_wg.update_process_group(master_address, master_port)
+        self.rollout_wg.update_process_group(master_address, master_port)
+
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False

@@ -420,6 +420,10 @@ def collect_dp_compute_data_proto(worker_group, output):
 
 # Global registry for dispatch mode.
 DISPATCH_MODE_FN_REGISTRY = {
+    Dispatch.RANK_ZERO: {
+            'dispatch_fn': dispatch_all_to_all,
+            'collect_fn': collect_all_to_all,
+    },
     Dispatch.ONE_TO_ALL: {
         'dispatch_fn': dispatch_one_to_all,
         'collect_fn': collect_all_to_all,

@@ -140,6 +140,8 @@ class ActorRolloutRefWorker(Worker):
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
+        self._is_partial_rollout = self.role == 'rollout'
+        print(f"self._is_partial_rollout {self._is_partial_rollout}")
         self._is_offload_param = False
         self._is_offload_optimizer = False
         if self._is_actor:
@@ -172,6 +174,89 @@ class ActorRolloutRefWorker(Worker):
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
 
+    @register(dispatch_mode=Dispatch.RANK_ZERO, execute_mode=Execute.RANK_ZERO)
+    def get_master_addr_port(self,):
+        # update group for partial rollout weight sync
+        master_address = ray._private.services.get_node_ip_address()
+        with socket.socket() as sock:
+            sock.bind(("", 0))
+            master_port = sock.getsockname()[1]
+        return master_address, master_port
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def update_process_group(self, master_address, master_port):
+        from verl.utils.distributed import init_process_group
+        # TODO: set world size by config
+        world_size = 2 + 1
+        backend = 'nccl'
+        group_name = 'update_weight'
+        if self._is_actor and torch.distributed.get_rank() == 0:
+            self._model_update_group = init_process_group(
+                backend=backend,
+                init_method=f"tcp://{master_address}:{master_port}",
+                world_size=world_size,
+                rank=0,
+                group_name=group_name,
+            )
+            # import ray.util.collective as collective
+
+            # collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
+            # self._model_update_group = group_name
+            # print(f"actor rank {torch.distributed.get_rank()}")
+        elif self._is_partial_rollout:
+            import ray.util.collective as collective
+            print(f"rollout rank {torch.distributed.get_rank()+1}")
+            self._model_update_group = init_process_group(
+                backend=backend,
+                init_method=f"tcp://{master_address}:{master_port}",
+                world_size=world_size,
+                rank=torch.distributed.get_rank()+1,
+                group_name=group_name,
+            )
+            # collective.init_collective_group(world_size=world_size, rank=torch.distributed.get_rank()+1, backend=backend, group_name=group_name)
+            # self._model_update_group = group_name
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def rollout_update_process_group(self, master_address, master_port):
+        from verl.utils.distributed import init_process_group
+        # TODO: set world size by config
+        world_size = 2 + 1
+        backend = 'nccl'
+        group_name = 'update_weight'
+        if self._is_actor and torch.distributed.get_rank() == 0:
+            print(f"partial rollout raw engine rank : {torch.distributed.get_rank()}")
+            self._model_update_group = init_process_group(
+                backend=backend,
+                init_method=f"tcp://{master_address}:{master_port}",
+                world_size=world_size,
+                rank=0,
+                group_name=group_name,
+            )
+        elif self._is_partial_rollout:
+            print(f"partial rollout engine rank : {torch.distributed.get_rank()}")
+            self._model_update_group = init_process_group(
+                backend=backend,
+                init_method=f"tcp://{master_address}:{master_port}",
+                world_size=world_size,
+                rank=torch.distributed.get_rank()+1,
+                group_name=group_name,
+            )
+
+
+    def _build_model_optimizer(self,
+                               model_path,
+                               fsdp_config,
+                               optim_config,
+                               override_model_config,
+                               use_remove_padding=False,
+                               enable_gradient_checkpointing=False,
+                               trust_remote_code=False,
+                               use_liger=False,
+                               role='actor'):
+        from verl.utils.model import print_model_size, update_model_config, get_generation_config
+        from verl.utils.torch_dtypes import PrecisionType
+        from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
     def _build_model_optimizer(
         self,
         model_path,
@@ -436,7 +521,6 @@ class ActorRolloutRefWorker(Worker):
                     model_hf_config=self.actor_model_config,
                     device_mesh=rollout_device_mesh,
                     trust_remote_code=trust_remote_code,
-                    replay_buffer=replay_buffer
                     replay_buffer=replay_buffer,
                     is_partial= self.role == 'rollout'
                                 ** lora_kwargs)
@@ -670,8 +754,6 @@ class ActorRolloutRefWorker(Worker):
 
         # clear kv cache
         get_torch_device().empty_cache()
-        return output
-        torch.cuda.empty_cache()
         return True
 
     @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY, blocking=False)
@@ -713,7 +795,6 @@ class ActorRolloutRefWorker(Worker):
         # clear kv cache
         log_gpu_memory_usage('After recompute log prob', logger=logger)
         return True
-
 
     @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)
     def partial_generate_sequences(self, prompts: DataProto):
@@ -882,6 +963,78 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def _broadcast_to_vllm(self):
+        # use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+        # cache_reset_refs = []
+        # if use_prefix_cache and torch.distributed.get_rank() == 0:
+        #     # clear prefix cache
+        #     for engine in self.vllm_engines:
+        #         cache_reset_refs.append(engine.reset_prefix_cache.remote())
+
+        torch.cuda.empty_cache()
+        model = self.actor_module_fsdp
+        count, num_params = 0, len(list(model.named_parameters()))
+
+        def _broadcast_param(param, count, num_params):
+            # Fire all vllm engines for broadcast
+            if self._is_actor and torch.distributed.get_rank() == 0:
+                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                import ray.util.collective as collective
+                collective.broadcast(param, 0, group_name=self._model_update_group)
+            elif self._is_partial_rollout:
+                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                import ray.util.collective as collective
+                collective.broadcast(param, 0, group_name=self._model_update_group)
+
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        with FSDP.summon_full_params(model):
+            for name, param in model.named_parameters():
+                count += 1  # empty_cache at last param
+                # broadcast
+                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+                print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
+                _broadcast_param(param, count, num_params)
+
+
+        torch.cuda.empty_cache()
+        from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
+        torch_dist_barrier_and_cuda_sync()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def rollout_broadcast_to_vllm(self):
+        # use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+        # cache_reset_refs = []
+        # if use_prefix_cache and torch.distributed.get_rank() == 0:
+        #     # clear prefix cache
+        #     for engine in self.vllm_engines:
+        #         cache_reset_refs.append(engine.reset_prefix_cache.remote())
+
+        torch.cuda.empty_cache()
+        model = self.actor_module_fsdp
+        count, num_params = 0, len(list(model.named_parameters()))
+
+        def _broadcast_param(param, count, num_params):
+            # Fire all vllm engines for broadcast
+            if self._is_actor and torch.distributed.get_rank() == 0:
+                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+            elif self._is_partial_rollout:
+                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        with FSDP.summon_full_params(model):
+            for name, param in model.named_parameters():
+                count += 1  # empty_cache at last param
+                # broadcast
+                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+                print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
+                _broadcast_param(param, count, num_params)
+
+
+        torch.cuda.empty_cache()
+        from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
+        torch_dist_barrier_and_cuda_sync()
 
 class CriticWorker(Worker):
     def __init__(self, config):

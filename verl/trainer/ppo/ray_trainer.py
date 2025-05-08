@@ -851,8 +851,10 @@ class RayPPOTrainer:
         master_address, master_port = self.actor_rollout_wg.get_master_addr_port()
         print(f"update weight group init for master {master_address}:{master_port}")
         self.actor_rollout_wg.update_process_group(master_address, master_port)
-        self.rollout_wg.update_process_group(master_address, master_port)
-
+        self.rollout_wg.rollout_update_process_group(master_address, master_port)
+        print("test broad cast vllm")
+        self.actor_rollout_wg._broadcast_to_vllm()
+        self.rollout_wg.rollout_broadcast_to_vllm()
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False

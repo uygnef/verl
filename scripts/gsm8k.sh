@@ -1,6 +1,6 @@
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_API_KEY=32b85f731210a303efe3a8d1ba11369f6c23d5dd
-export CUDA_VISIBLE_DEVICES='4,5,6,7'
+export CUDA_VISIBLE_DEVICES='0,1,2,3'
 export PYTHONPATH=$PYTHONPATH:/home/luban/Megatron-LM-v0.11.0
 export TMPDIR=/tmp-data
 output_dir=/nfs/ofs-llm-ssd/user/fengyu/models/Qwen2.5-7B-grpo-ori
@@ -30,7 +30,7 @@ python3 -m verl.trainer.main_ppo  --config-name='ppo_trainer.yaml' \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-    actor_rollout_ref.rollout.n=1 \
+    actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \

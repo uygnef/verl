@@ -174,7 +174,7 @@ class ActorRolloutRefWorker(Worker):
             self.config.ref.log_prob_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
 
-    @register(dispatch_mode=Dispatch.RANK_ZERO, execute_mode=Execute.RANK_ZERO)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, execute_mode=Execute.RANK_ZERO)
     def get_master_addr_port(self,):
         # update group for partial rollout weight sync
         master_address = ray._private.services.get_node_ip_address()
@@ -183,38 +183,21 @@ class ActorRolloutRefWorker(Worker):
             master_port = sock.getsockname()[1]
         return master_address, master_port
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @register(execute_mode=Execute.RANK_ZERO, blocking=False)
     def update_process_group(self, master_address, master_port):
         from verl.utils.distributed import init_process_group
         # TODO: set world size by config
         world_size = 2 + 1
         backend = 'nccl'
         group_name = 'update_weight'
-        if self._is_actor and torch.distributed.get_rank() == 0:
-            self._model_update_group = init_process_group(
-                backend=backend,
-                init_method=f"tcp://{master_address}:{master_port}",
-                world_size=world_size,
-                rank=0,
-                group_name=group_name,
-            )
-            # import ray.util.collective as collective
-
-            # collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
-            # self._model_update_group = group_name
-            # print(f"actor rank {torch.distributed.get_rank()}")
-        elif self._is_partial_rollout:
-            import ray.util.collective as collective
-            print(f"rollout rank {torch.distributed.get_rank()+1}")
-            self._model_update_group = init_process_group(
-                backend=backend,
-                init_method=f"tcp://{master_address}:{master_port}",
-                world_size=world_size,
-                rank=torch.distributed.get_rank()+1,
-                group_name=group_name,
-            )
-            # collective.init_collective_group(world_size=world_size, rank=torch.distributed.get_rank()+1, backend=backend, group_name=group_name)
-            # self._model_update_group = group_name
+        self._model_update_group = init_process_group(
+            backend=backend,
+            init_method=f"tcp://{master_address}:{master_port}",
+            world_size=world_size,
+            rank=0,
+            group_name=group_name,
+        )
+        print(f"actor rank {torch.distributed.get_rank()} {self.role}, {torch.cuda.get_device_name()}")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def rollout_update_process_group(self, master_address, master_port):
@@ -223,24 +206,14 @@ class ActorRolloutRefWorker(Worker):
         world_size = 2 + 1
         backend = 'nccl'
         group_name = 'update_weight'
-        if self._is_actor and torch.distributed.get_rank() == 0:
-            print(f"partial rollout raw engine rank : {torch.distributed.get_rank()}")
-            self._model_update_group = init_process_group(
-                backend=backend,
-                init_method=f"tcp://{master_address}:{master_port}",
-                world_size=world_size,
-                rank=0,
-                group_name=group_name,
-            )
-        elif self._is_partial_rollout:
-            print(f"partial rollout engine rank : {torch.distributed.get_rank()}")
-            self._model_update_group = init_process_group(
-                backend=backend,
-                init_method=f"tcp://{master_address}:{master_port}",
-                world_size=world_size,
-                rank=torch.distributed.get_rank()+1,
-                group_name=group_name,
-            )
+        print(f"rollout rank {torch.distributed.get_rank() + 1}. {torch.cuda.get_device_name()}")
+        self._model_update_group = init_process_group(
+            backend=backend,
+            init_method=f"tcp://{master_address}:{master_port}",
+            world_size=world_size,
+            rank=torch.distributed.get_rank()+1,
+            group_name=group_name,
+        )
 
 
     def _build_model_optimizer(self,
@@ -976,17 +949,17 @@ class ActorRolloutRefWorker(Worker):
         torch.cuda.empty_cache()
         model = self.actor_module_fsdp
         count, num_params = 0, len(list(model.named_parameters()))
-
+        print(f"{self._is_actor} {self._is_partial_rollout} torch.cuda.get_device_name() {torch.cuda.get_device_name()}")
         def _broadcast_param(param, count, num_params):
             # Fire all vllm engines for broadcast
             if self._is_actor and torch.distributed.get_rank() == 0:
-                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
-                import ray.util.collective as collective
-                collective.broadcast(param, 0, group_name=self._model_update_group)
+                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                # import ray.util.collective as collective
+                # collective.broadcast(param, 0, group_name=self._model_update_group)
             elif self._is_partial_rollout:
-                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
-                import ray.util.collective as collective
-                collective.broadcast(param, 0, group_name=self._model_update_group)
+                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                # import ray.util.collective as collective
+                # collective.broadcast(param, 0, group_name=self._model_update_group)
 
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         with FSDP.summon_full_params(model):

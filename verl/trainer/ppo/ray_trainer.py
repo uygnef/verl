@@ -823,9 +823,11 @@ class RayPPOTrainer:
             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
-            print(f"resource_pool {resource_pool}, class_dict {class_dict}")
-            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
-            wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, device_name=self.device_name, **wg_kwargs)
+            # worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            wg_dict = self.ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=list(class_dict.values())[0])
+            print(f"resource_pool {resource_pool}, class_dict {class_dict}, wg_dict {wg_dict}")
+            print(f"ip {wg_dict.master_address} port {wg_dict.master_port}")
+
             spawn_wg = wg_dict.spawn(prefix_set=class_dict.keys())
             all_wg.update(spawn_wg)
 
@@ -848,7 +850,6 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model(self.replay_buffer)
-        master_address, master_port = self.actor_rollout_wg.get_master_addr_port()
         print(f"update weight group init for master {master_address}:{master_port}")
         self.actor_rollout_wg.update_process_group(master_address, master_port)
         self.rollout_wg.rollout_update_process_group(master_address, master_port)

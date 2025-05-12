@@ -111,7 +111,6 @@ class TaskRunner:
 
         role_worker_mapping = {
             Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
-            Role.RefPolicy: ray.remote(ActorRolloutRefWorker),
             Role.Rollout: ray.remote(ActorRolloutRefWorker),
         }
 
@@ -119,6 +118,7 @@ class TaskRunner:
         actor_rollout_ref_pool_id = 'actor_rollout_ref_pool'
         partial_rollout_pool_id = 'partial_rollout_pool'
         assert config.trainer.nnodes > 1, f'partial rollout need n_node > 1, now is {config.trainer.nnodes}'
+        print(f"config.trainer.nnodes // 2 == 0 and config.trainer.n_gpus_per_node // 2 > 0: {config.trainer.nnodes // 2}, {config.trainer.n_gpus_per_node // 2 }")
         if config.trainer.nnodes // 2 == 0 and config.trainer.n_gpus_per_node // 2 > 0:
             resource_pool_spec = {
                 actor_rollout_ref_pool_id: [config.trainer.n_gpus_per_node // 2] * config.trainer.nnodes,
@@ -129,12 +129,12 @@ class TaskRunner:
                 actor_rollout_ref_pool_id: [config.trainer.n_gpus_per_node] * (config.trainer.nnodes // 2),
                 partial_rollout_pool_id: [config.trainer.n_gpus_per_node] * (config.trainer.nnodes // 2),
             }
-
+            # resource_pool_spec {'actor_rollout_ref_pool': [2], 'partial_rollout_pool': [2]}
+        print(f"resource_pool_spec {resource_pool_spec}")
 
         mapping = {
             Role.ActorRollout: actor_rollout_ref_pool_id,
             Role.Rollout: partial_rollout_pool_id,
-            Role.RefPolicy: actor_rollout_ref_pool_id,
         }
 
         # we should adopt a multi-source reward function here

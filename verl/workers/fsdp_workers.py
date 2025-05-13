@@ -953,24 +953,26 @@ class ActorRolloutRefWorker(Worker):
         def _broadcast_param(param, count, num_params):
             # Fire all vllm engines for broadcast
             if self._is_actor and torch.distributed.get_rank() == 0:
-                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                torch.distributed.broadcast(torch.ones((3,1), dtype=torch.bfloat16).cuda(), 0, group=self._model_update_group)
+
+                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
                 # import ray.util.collective as collective
                 # collective.broadcast(param, 0, group_name=self._model_update_group)
-            elif self._is_partial_rollout:
-                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+
                 # import ray.util.collective as collective
                 # collective.broadcast(param, 0, group_name=self._model_update_group)
 
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        with FSDP.summon_full_params(model):
-            for name, param in model.named_parameters():
-                count += 1  # empty_cache at last param
-                # broadcast
-                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-                print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
-                _broadcast_param(param, count, num_params)
+        # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        # with FSDP.summon_full_params(model):
+        #     for name, param in model.named_parameters():
+        #         count += 1  # empty_cache at last param
+        #         # broadcast
+        #         # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+        #         print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
+        #         _broadcast_param(param, count, num_params)
 
-
+        _broadcast_param(None, None, None)
         torch.cuda.empty_cache()
         from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
         torch_dist_barrier_and_cuda_sync()
@@ -990,20 +992,20 @@ class ActorRolloutRefWorker(Worker):
 
         def _broadcast_param(param, count, num_params):
             # Fire all vllm engines for broadcast
-            if self._is_actor and torch.distributed.get_rank() == 0:
-                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
-            elif self._is_partial_rollout:
-                torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+            a = torch.empty((3, 1), dtype=torch.bfloat16).cuda()
+            torch.distributed.broadcast(a, 0, group=self._model_update_group)
+            print(f"rollout a result : {a}")
 
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        with FSDP.summon_full_params(model):
-            for name, param in model.named_parameters():
-                count += 1  # empty_cache at last param
-                # broadcast
-                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-                print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
-                _broadcast_param(param, count, num_params)
+        # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        # with FSDP.summon_full_params(model):
+        #     for name, param in model.named_parameters():
+        #         count += 1  # empty_cache at last param
+        #         # broadcast
+        #         # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+        #         print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
+        #         _broadcast_param(param, count, num_params)
 
+        _broadcast_param(None, None, None)
 
         torch.cuda.empty_cache()
         from verl.utils.distributed import torch_dist_barrier_and_cuda_sync

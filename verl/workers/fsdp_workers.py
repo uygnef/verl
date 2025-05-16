@@ -197,7 +197,7 @@ class ActorRolloutRefWorker(Worker):
             rank=0,
             group_name=group_name,
         )
-        print(f"actor rank {torch.distributed.get_rank()} {self.role}, {torch.cuda.get_device_name()}")
+        print(f"actor rank {torch.distributed.get_rank()} role: {self.role}, model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def rollout_update_process_group(self, master_address, master_port):
@@ -214,6 +214,7 @@ class ActorRolloutRefWorker(Worker):
             rank=torch.distributed.get_rank()+1,
             group_name=group_name,
         )
+        print(f"rollout rank {torch.distributed.get_rank()} role: {self.role}, model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
 
 
     def _build_model_optimizer(self,
@@ -657,6 +658,7 @@ class ActorRolloutRefWorker(Worker):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_contents=self.config.actor.checkpoint.contents,
             )
+        self.fsdp_shape = self.get_model_shape()
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
@@ -936,80 +938,70 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 
+    def get_model_shape(self, ):
+        import sys
+        assert sys.version_info >= (3, 6), "Use Python 3.6 or newer to keep order of dict"
+        model_shape = {}
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        with FSDP.summon_full_params(self.actor_module_fsdp, recurse=False, writeback=False):
+            for param_name, param in self.actor_module_fsdp.named_parameters():
+                model_shape[param_name] = param.data.shape
+        return model_shape
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def _broadcast_to_vllm(self):
-        # use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
-        # cache_reset_refs = []
-        # if use_prefix_cache and torch.distributed.get_rank() == 0:
-        #     # clear prefix cache
-        #     for engine in self.vllm_engines:
-        #         cache_reset_refs.append(engine.reset_prefix_cache.remote())
+    def _broadcast_to_vllm(self,):
+        # torch.cuda.empty_cache()
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
-        torch.cuda.empty_cache()
-        model = self.actor_module_fsdp
-        count, num_params = 0, len(list(model.named_parameters()))
-        print(f"{self._is_actor} {self._is_partial_rollout} torch.cuda.get_device_name() {torch.cuda.get_device_name()}")
-        def _broadcast_param(param, count, num_params):
-            # Fire all vllm engines for broadcast
-            if self._is_actor and torch.distributed.get_rank() == 0:
-                torch.distributed.broadcast(torch.ones((3,1), dtype=torch.bfloat16).cuda(), 0, group=self._model_update_group)
+        with FSDP.summon_full_params(self.actor_module_fsdp, recurse=False, writeback=False):
+            for param_name, param in self.actor_module_fsdp.named_parameters():
+                if torch.distributed.get_rank() == 0:
+                    print(f"actor broadcast to vllm start")
+                    print(f"param.data {torch.sum(param.data)}, shape {param.data.shape}, type {param.data.dtype}")
 
-                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
-                # import ray.util.collective as collective
-                # collective.broadcast(param, 0, group_name=self._model_update_group)
-                # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                    torch.distributed.broadcast(param.data, 0,
+                                                group=self._model_update_group)
+                    print(f"actor broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}")
 
-                # import ray.util.collective as collective
-                # collective.broadcast(param, 0, group_name=self._model_update_group)
 
-        # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        # with FSDP.summon_full_params(model):
-        #     for name, param in model.named_parameters():
-        #         count += 1  # empty_cache at last param
-        #         # broadcast
-        #         # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-        #         print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
-        #         _broadcast_param(param, count, num_params)
-
-        _broadcast_param(None, None, None)
-        torch.cuda.empty_cache()
-        from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
-        torch_dist_barrier_and_cuda_sync()
+        torch.distributed.barrier()
+        # torch.cuda.empty_cache()
+        # from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
+        # torch_dist_barrier_and_cuda_sync()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def rollout_broadcast_to_vllm(self):
-        # use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
-        # cache_reset_refs = []
-        # if use_prefix_cache and torch.distributed.get_rank() == 0:
-        #     # clear prefix cache
-        #     for engine in self.vllm_engines:
-        #         cache_reset_refs.append(engine.reset_prefix_cache.remote())
+        print(f"rollout broadcast to vllm start")
 
-        torch.cuda.empty_cache()
-        model = self.actor_module_fsdp
-        count, num_params = 0, len(list(model.named_parameters()))
-
-        def _broadcast_param(param, count, num_params):
-            # Fire all vllm engines for broadcast
-            a = torch.empty((3, 1), dtype=torch.bfloat16).cuda()
+        for name, shape in self.fsdp_shape.items():
+            print(f"rollout update name {name} shape {shape}")
+            a = torch.empty(shape, dtype=torch.float32, device="cuda")
             torch.distributed.broadcast(a, 0, group=self._model_update_group)
-            print(f"rollout a result : {a}")
+            print(
+                f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, sum {torch.sum(a)}")
 
-        # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        # with FSDP.summon_full_params(model):
-        #     for name, param in model.named_parameters():
-        #         count += 1  # empty_cache at last param
-        #         # broadcast
-        #         # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-        #         print(f"self._is_actor {self._is_actor}, {self._is_partial_rollout}... {name}:{param.shape}")
-        #         _broadcast_param(param, count, num_params)
+        # print(f"rollout before broadcast  shape  sum:  "
+        #       f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)
+        # weight = torch.empty((100, 10), device="cuda")
+        # torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+        # print(f"rollout after broadcast finish: shape {weight.shape} sum {torch.sum(weight)}")
 
-        _broadcast_param(None, None, None)
+        # params = self.actor_module_fsdp.state_dict()
+        # for name, param in params.items():
+        #     # broadcast
+        #     # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+        #     # weight = torch.empty(param.shape, dtype=param.dtype, device="cuda")
+        #     print(f"rollout before broadcast {name}: shape {param.shape} sum: {torch.sum(param)} "
+        #           f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)
+        #     weight = torch.empty((100, 10), device="cuda")
+        #     torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+        #     print(f"rollout after broadcast finish: shape {weight.shape} sum {torch.sum(weight)}")
+        #
+        #     break
 
-        torch.cuda.empty_cache()
-        from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
-        torch_dist_barrier_and_cuda_sync()
+        # torch.cuda.empty_cache()
+        # from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
+        # torch_dist_barrier_and_cuda_sync()
 
 class CriticWorker(Worker):
     def __init__(self, config):

@@ -853,7 +853,7 @@ class RayPPOTrainer:
         print(f"update weight group init for master {master_address}:{master_port}")
         self.actor_rollout_wg.update_process_group(master_address, master_port)
         self.rollout_wg.rollout_update_process_group(master_address, master_port)
-        print("test broad cast vllm")
+        print("test broadcast vllm")
         self.actor_rollout_wg._broadcast_to_vllm()
         self.rollout_wg.rollout_broadcast_to_vllm()
 

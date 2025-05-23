@@ -71,6 +71,11 @@ from safetensors.torch import save_file
 from dataclasses import asdict
 import json
 
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.utils import StatelessProcessGroup
+from vllm.utils import get_ip, get_open_port
 
 import ray
 from codetiming import Timer
@@ -497,8 +502,8 @@ class ActorRolloutRefWorker(Worker):
                     trust_remote_code=trust_remote_code,
                     replay_buffer=replay_buffer,
                     is_partial= self.role == 'rollout'
-                                ** lora_kwargs)
-                else:
+                    **lora_kwargs)
+            else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
@@ -938,15 +943,47 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 
-    def get_model_shape(self, ):
-        import sys
-        assert sys.version_info >= (3, 6), "Use Python 3.6 or newer to keep order of dict"
-        model_shape = {}
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        with FSDP.summon_full_params(self.actor_module_fsdp, recurse=False, writeback=False):
-            for param_name, param in self.actor_module_fsdp.named_parameters():
-                model_shape[param_name] = param.data.shape
-        return model_shape
+    def get_model_shape(self, module, prefix: str = "", visited=None):
+        print(f"get_model_shape: {prefix}")
+        if visited is None:
+            visited = {}
+
+        for child_name, child_module in module.named_children():
+            child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+            self.get_model_shape(
+                child_module, prefix=child_prefix, visited=visited
+            )  # recurse into the child
+
+        if isinstance(module, FSDP) and prefix != "":
+            print(f"get_model_shape into prefix {prefix}, {module}")
+            with FSDP.summon_full_params(module, recurse=False, writeback=False):
+                for param_name, param in module.named_parameters():
+                    full_name = f"{prefix}.{param_name}" if prefix else param_name
+                    print(f"for loop {full_name}")
+                    for extra in ("_fsdp_wrapped_module.", "_checkpoint_wrapped_module."):
+                        full_name = full_name.replace(extra, "")
+
+                    if full_name in visited:
+                        continue  # skip FSDP subtrees already traversed
+                    visited[full_name] = param.data.shape
+        return visited
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def _broadcast_to_vllm_new(self,):
+        # self._sync_fsdp_params_to_vllm(self.actor_module_fsdp)
+        params = self.actor_module_fsdp.state_dict()
+
+        if torch.distributed.get_rank() == 0:
+            for name, param in params.items():
+                # broadcast
+                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+                # weight = torch.empty(param.shape, dtype=param.dtype, device="cuda")
+                print(f"actor before broadcast {name}: shape {param.shape} sum: {torch.sum(param)} "
+                      f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)
+                # torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+                self.pynccl_comm.broadcast(param.data, src=2)
+                print(f"actor after broadcast finish: name {name}")
+                self.pynccl_comm.group.barrier()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def _broadcast_to_vllm(self,):
@@ -975,10 +1012,12 @@ class ActorRolloutRefWorker(Worker):
 
         for name, shape in self.fsdp_shape.items():
             print(f"rollout update name {name} shape {shape}")
-            a = torch.empty(shape, dtype=torch.float32, device="cuda")
-            torch.distributed.broadcast(a, 0, group=self._model_update_group)
+            weight = torch.empty(shape, dtype=torch.float32, device="cuda")
+            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             print(
-                f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, sum {torch.sum(a)}")
+                f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, name {name} shape {shape}")
+            # self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
+            del weight
 
         # print(f"rollout before broadcast  shape  sum:  "
         #       f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)

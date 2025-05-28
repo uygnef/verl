@@ -114,7 +114,6 @@ def fit(self):
                         continue
                     total_batch_nums += batch_nums
 
-                    print(f"batch info : {batch}")
                     with _timer('get_batch', timing_raw):
                         data = DataProto()
                         data.batch = ray.get(self.replay_buffer.get.remote('actor_update',

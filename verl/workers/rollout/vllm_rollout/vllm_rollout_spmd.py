@@ -348,8 +348,8 @@ class vLLMRollout(BaseRollout):
                     and self.config.free_cache_engine
             ):
                 self.inference_engine.free_cache_engine()
-            else:
-                self.partial_generate_sequences()
+        else:
+            self.partial_generate_sequences()
 
 
         # if self.tp_group.is_first_rank:

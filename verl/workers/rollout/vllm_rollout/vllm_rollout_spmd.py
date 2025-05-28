@@ -30,41 +30,29 @@ import logging
 import os
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Any, Dict, List, Union
-
-import time
 from pprint import pprint
+from typing import Any, Union
+from typing import Dict
+from typing import List
 
 import numpy as np
-from typing import List
-from contextlib import contextmanager
-
 import ray
-from omegaconf import DictConfig
 import torch
 import torch.distributed
-from ray.rllib.utils.spaces.space_utils import batch
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
+from torch.distributed import DeviceMesh
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker_base import WorkerWrapperBase
 
-from torch import nn
-from typing import Any, Union
-
-from torch.distributed import DeviceMesh
-
 from recipe.partial_rollout.replay_buffer import DistributedReplayBuffer
 from verl import DataProto
-from verl.utils.torch_functional import get_eos_mask, pad_2d_list_to_length, broadcast_dict_tensor
-from verl.workers.rollout.base import BaseRollout
-from vllm.distributed import parallel_state as vllm_ps
-from vllm import LLM, SamplingParams
 from verl.third_party.vllm import vllm_version
 from verl.utils.debug import GPUMemoryLogger
-from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
+from verl.utils.torch_functional import get_response_mask, broadcast_dict_tensor
+from verl.utils.torch_functional import pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__file__)
@@ -394,13 +382,12 @@ class vLLMRollout(BaseRollout):
         position_ids = batch['position_ids']
         global_sample_id = batch['sample_id']
         # used to construct attention_mask
-        eos_token_id = self.eos_token_id
         vllm_inputs = batch['raw_prompt_ids'].tolist()
         prompt_token_ids = []
         for input_data in vllm_inputs:
             input_tensor = torch.tensor(input_data)
             mask = input_tensor != self.eos_token_id
-            prompt_token_ids.append({'prompt_token_ids': input_tensor[mask]})
+            prompt_token_ids.append({'prompt_token_ids': input_tensor[mask].tolist()})
 
         torch.distributed.barrier()
         kwargs = {
@@ -409,6 +396,7 @@ class vLLMRollout(BaseRollout):
         }
 
         with self.update_sampling_params(**kwargs):
+            print(f"partial rollout prompt: {prompt_token_ids}")
             outputs = self.inference_engine.generate(
                 prompts=prompt_token_ids,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
@@ -466,7 +454,7 @@ class vLLMRollout(BaseRollout):
         # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
         response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-        response_attention_mask = get_eos_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
+        response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask.cpu(), response_attention_mask.cpu()), dim=-1)
         seq = torch.cat([idx.cpu(), torch.tensor(response)], dim=-1)
         # all the tp ranks should contain the same data here. data in all ranks are valid

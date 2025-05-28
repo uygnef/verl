@@ -14,19 +14,19 @@
 """
 An naive implementation of split placment example
 """
+import time
 import uuid
-from copy import deepcopy
 from pprint import pprint
 
 import numpy as np
+import ray
 import torch
-from tensordict import TensorDict
 from tqdm import tqdm
 
 from verl import DataProto
 from verl.trainer.ppo.metric_utils import compute_throughout_metrics
 from verl.trainer.ppo.ray_trainer import compute_advantage, apply_kl_penalty, reduce_metrics, compute_data_metrics, \
-    _timer, compute_timing_metrics, AdvantageEstimator
+    _timer, compute_timing_metrics
 
 
 def fit(self):
@@ -91,8 +91,8 @@ def fit(self):
                     gen_batch1, gen_batch2 = gen_batch.chunk(2)
                     self.rollout_wg.generate_sequences_partial(gen_batch1)
                     self.actor_rollout_wg.generate_sequences(gen_batch2)
-                total_batch_size = 0
-                while total_batch_size < 2:
+                total_batch_nums = 0
+                while total_batch_nums < 2:
                     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                                                              dtype=object)
                     # repeat to align with repeated responses in rollout
@@ -105,25 +105,30 @@ def fit(self):
                     # if self.config.trainer.balance_batch:
                     #     self._balance_batch(batch, metrics=metrics)
 
-                    batch_size = self.databatch_manager.get_batch(
+                    batch_nums = self.databatch_manager.get_batch_num(
                         batch_size=self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
-                    print(f"get_batch size {batch_size} batch size", total_batch_size)
-                    total_batch_size += batch_size
-                    # compute global_valid tokens
+                    print(f"get_batch_num nums {batch_nums} batch size", total_batch_nums)
+                    if batch_nums == 0:
+                        time.sleep(3)
+                        print("0 batch num sleep 3 seconds")
+                        continue
+                    total_batch_nums += batch_nums
 
-                    # TODO: check this
-                    # batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-                    batch.batch = TensorDict({"xx": torch.ones(4, 1)})
-                    batch.meta_info['partial_batch_size'] = batch_size
                     print(f"batch info : {batch}")
+                    with _timer('get_batch', timing_raw):
+                        data = DataProto()
+                        data.batch = ray.get(self.replay_buffer.get.remote('actor_update',
+                                                                         batch_nums * self.config.actor_rollout_ref.actor.ppo_mini_batch_size))
+                        print(f"get batch data")
+
                     # recompute old_log_probs
                     with _timer('old_log_prob', timing_raw):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-
+                        old_log_prob = self.actor_rollout_wg.compute_log_prob(data)
                         new_none_tensor_batch = self.databatch_manager.get_none_tensor(old_log_prob.batch,
                                                                                        batch.non_tensor_batch)
                         batch = old_log_prob
                         batch.non_tensor_batch = new_none_tensor_batch
+
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with _timer('ref', timing_raw):
@@ -150,13 +155,12 @@ def fit(self):
                         batch.batch['token_level_scores'] = reward_tensor
 
                         # compute rewards. apply_kl_penalty if available
-                        if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
-                            batch, kl_metrics = apply_kl_penalty(batch,
-                                                                 kl_ctrl=self.kl_ctrl,
+                        if self.config.algorithm.use_kl_in_reward:
+                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward,
                                                                  kl_penalty=self.config.algorithm.kl_penalty)
                             metrics.update(kl_metrics)
                         else:
-                            batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
                         # compute advantages, executed on the driver process
                         batch = compute_advantage(batch,
@@ -180,6 +184,10 @@ def fit(self):
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
 
+                with _timer("sync_rollout_weights", timing_raw):
+                    self.actor_rollout_wg._broadcast_to_vllm()
+                    self.rollout_wg.rollout_broadcast_to_vllm()
+
                 # validate
                 if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
                         (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
@@ -195,6 +203,7 @@ def fit(self):
                         self._save_checkpoint()
 
             # collect metrics
+            batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
             metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
             metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
             # TODO: implement actual tflpo and theoretical tflpo

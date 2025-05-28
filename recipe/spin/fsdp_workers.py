@@ -79,7 +79,7 @@ class SPINRolloutRefWorker(ActorRolloutRefWorker):
 
         if self._is_actor or self._is_rollout or self._is_ref:
             # we need the model for actor and rollout
-            if self._is_actor or self._is_ref:
+            if self._is_actor or self._is_ref or self._is_partial_rollout:
                 optim_config = self.config.actor.optim
                 fsdp_config = self.config.actor.fsdp_config
             else:

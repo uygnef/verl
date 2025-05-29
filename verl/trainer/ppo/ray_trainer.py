@@ -962,7 +962,7 @@ class RayPPOTrainer:
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
-    def fit(self):
+    def fit(self,):
         """
         The training loop of PPO.
         The driver process only need to call the compute functions of the worker group through RPC

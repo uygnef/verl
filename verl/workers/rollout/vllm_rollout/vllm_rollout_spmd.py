@@ -227,6 +227,10 @@ class vLLMRollout(BaseRollout):
         from vllm.distributed import GroupCoordinator
         self.tp_group: GroupCoordinator = group
 
+
+    def set_model_update_group(self, group):
+        self.model_update_group = group
+
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
@@ -309,7 +313,7 @@ class vLLMRollout(BaseRollout):
         rank = torch.distributed.get_rank()
         with self.update_sampling_params(**kwargs):
             # if self.tp_group.is_first_rank:
-            #     ray.get(self.replay_buffer.put.remote(vllm_inputs, is_finish=False))
+            #     ray.get(self.replay_buffer.put.remote(vllm_inputs, finished=False))
             #     vllm_inputs = ray.get(self.replay_buffer.get.remote('generate'))
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
@@ -337,6 +341,8 @@ class vLLMRollout(BaseRollout):
 
                 # put unfinish to queue
                 self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
+        torch.distributed.barrier()
+        torch.distributed.barrier(self.model_update_group)
         if not self.is_partial:
             # free vllm cache engine
             if (
@@ -358,17 +364,7 @@ class vLLMRollout(BaseRollout):
         print("finish")
 
     @torch.no_grad()
-    def partial_generate_sequences(self, ):
-        # users can customize different sampling_params at different run
-        tp_group = self.rollout_device_mesh['infer_tp'].get_group()
-        dp_group = self.rollout_device_mesh['dp'].get_group()
-        if self.tp_group.is_first_rank:
-            total_batch = ray.get(self.replay_buffer.get_continue_size.remote())
-            batch_size = total_batch // 2
-            if dp_group.rank() == 0:
-                batch_size += total_batch % 2
-        torch.distributed.barrier() # for consistant
-
+    def partial_generate_sequences(self,):
         if self.tp_group.is_first_rank:
             batch = ray.get(self.replay_buffer.get.remote('generate'))
             print(f"partial_generate_sequences batch, {batch}")
@@ -385,14 +381,13 @@ class vLLMRollout(BaseRollout):
         vllm_inputs = batch['raw_prompt_ids'].tolist()
         prompt_token_ids = []
         for input_data in vllm_inputs:
-            input_tensor = torch.tensor(input_data)
-            mask = input_tensor != self.eos_token_id
-            prompt_token_ids.append({'prompt_token_ids': input_tensor[mask].tolist()})
+            print(f"partial rollout input_data {input_data}")
+            filtered_tokens = [token for token in input_data if token not in self.eos_token_id]
+            prompt_token_ids.append({'prompt_token_ids': filtered_tokens})
 
-        torch.distributed.barrier()
         kwargs = {
             'n': 1,  # if greedy, only 1 response
-            'max_tokens': 50,
+            'max_tokens': 100,
         }
 
         with self.update_sampling_params(**kwargs):
@@ -403,8 +398,8 @@ class vLLMRollout(BaseRollout):
                 use_tqdm=False)
             response = []
             for output in outputs:
-                    for sample_id in range(len(output.outputs)):
-                        response.append(output.outputs[sample_id].token_ids)
+                for sample_id in range(len(output.outputs)):
+                    response.append(output.outputs[sample_id].token_ids)
             finish_response_idx = list(range(len(response)))
             self.put_finish_data(response, finish_response_idx, idx,
                                      attention_mask, position_ids, global_sample_id, self.eos_token_id)
@@ -468,7 +463,7 @@ class vLLMRollout(BaseRollout):
                 'position_ids': position_ids.cpu(),
                 'sample_id': global_sample_id.cpu(),
         }, batch_size=batch_size)
-        ray.get(self.replay_buffer.put.remote(batch, is_finish=True))
+        ray.get(self.replay_buffer.put.remote(batch, finished=True))
         print(f"finish put success: {batch_size}")
 
     @torch.no_grad()
@@ -490,12 +485,10 @@ class vLLMRollout(BaseRollout):
             'position_ids': position_ids.cpu(),
             'sample_id': global_sample_id.cpu(),
         }, batch_size=len(continue_respond_idx))
-        ray.get(self.replay_buffer.put.remote(data, is_finish=False))
+        ray.get(self.replay_buffer.put.remote(data, finished=False))
 
 
     def broadcast_data_dict(self, data=None):
-        tp_group = self.rollout_device_mesh["infer_tp"].get_group()
-        print(f"tp group",tp_group )
         src_rank = self.tp_group.first_rank
         if data is not None:
             result = []
@@ -512,7 +505,6 @@ class vLLMRollout(BaseRollout):
             for name, shape in zip(self.countinue_keys, tensor_shape.tolist()):
                 data[name] = torch.empty(shape, dtype=torch.long)
             data = TensorDict(data)
-        print("start ")
         broadcast_dict_tensor(data, src=src_rank, group=self.rollout_device_mesh["infer_tp"].get_group())
         return data
 

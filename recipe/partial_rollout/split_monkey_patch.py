@@ -29,7 +29,7 @@ from verl.trainer.ppo.ray_trainer import compute_advantage, apply_kl_penalty, re
     _timer, compute_timing_metrics
 
 
-def fit(self):
+def fit(self, batch_size):
     """
     The training loop of PPO.
     The driver process only need to call the compute functions of the worker group through RPC to construct the PPO dataflow.
@@ -92,7 +92,7 @@ def fit(self):
                     self.rollout_wg.generate_sequences_partial(gen_batch1)
                     self.actor_rollout_wg.generate_sequences(gen_batch2)
                 total_batch_nums = 0
-                while total_batch_nums < 2:
+                while total_batch_nums < batch_size:
                     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                                                              dtype=object)
                     # repeat to align with repeated responses in rollout

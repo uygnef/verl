@@ -41,15 +41,15 @@ class DistributedReplayBuffer:
         self.continue_queue = Queue()
         self.total_samples = 0
 
-    def put_batch(self, data_list: TensorDict, is_finish: bool) -> None:
+    def put_batch(self, data_list: TensorDict, finished: bool) -> None:
         """
         将数据放入 Replay Buffer
 
         Args:
             data: 要存储的数据
-            is_finish: 数据是否完成（包含 eos）
+            finished: 数据是否完成（包含 eos）
         """
-        if is_finish:
+        if finished:
             # 如果是完成的数据，放入 finish 队列
             self.finish_queue.put_nowait(data_list)
             # print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
@@ -58,24 +58,23 @@ class DistributedReplayBuffer:
             self.continue_queue.put_nowait(data_list)
             # print(f"rank : put to continue_queue {self.continue_queue.qsize()}", flush=True)
 
-    def put(self, data: Any, is_finish: bool) -> None:
+    def put(self, data: Any, finished: bool) -> None:
         """
         将数据放入 Replay Buffer
 
         Args:
             data: 要存储的数据
-            is_finish: 数据是否完成（包含 eos）
+            finished: 数据是否完成（包含 eos）
         """
-        if is_finish:
+        if finished:
             # 如果是完成的数据，放入 finish 队列
             self.finish_queue.put_nowait(data)
-            print(data.batch_size)
             self.total_samples += list(data.batch_size)[0]
-            print(f"rank : put to finish {self.finish_queue.qsize()}", flush=True)
+            print(f"rank : put {data.batch_size} to finish {self.finish_queue.qsize()}", flush=True)
         else:
             # 如果是未完成的数据，放入 continue 队列
             self.continue_queue.put_nowait(data)
-            print(f"rank : put to continue_queue {self.continue_queue.qsize()}", flush=True)
+            print(f"rank : put {data.batch_size} to continue_queue {self.continue_queue.qsize()}", flush=True)
 
     def get(self, consumer_type: str, batch_size: int = 1) -> Optional[Any]:
         """

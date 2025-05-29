@@ -93,6 +93,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         self.tp_size = self.device_mesh["infer_tp"].size()
         self.tp_rank = self.device_mesh["infer_tp"].get_local_rank()
+        self.global_size = self.device_mesh["dp"].size() * self.tp_size
 
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = get_torch_device().get_rng_state()

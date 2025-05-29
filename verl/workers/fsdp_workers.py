@@ -146,7 +146,6 @@ class ActorRolloutRefWorker(Worker):
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
         self._is_partial_rollout = self.role == 'rollout'
-        print(f"self._is_partial_rollout {self._is_partial_rollout}")
         self._is_offload_param = False
         self._is_offload_optimizer = False
         if self._is_actor:
@@ -191,8 +190,8 @@ class ActorRolloutRefWorker(Worker):
     @register(execute_mode=Execute.RANK_ZERO, blocking=False)
     def update_process_group(self, master_address, master_port):
         from verl.utils.distributed import init_process_group
-        # TODO: set world size by config
-        world_size = 2 + 1
+        # TODO: set by config
+        world_size = self.rollout_group_size + 1
         backend = 'nccl'
         group_name = 'update_weight'
         self._model_update_group = init_process_group(
@@ -202,13 +201,14 @@ class ActorRolloutRefWorker(Worker):
             rank=0,
             group_name=group_name,
         )
+        self.rollout.set_model_update_group(self._model_update_group)
         print(f"actor rank {torch.distributed.get_rank()} role: {self.role}, model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def rollout_update_process_group(self, master_address, master_port):
         from verl.utils.distributed import init_process_group
-        # TODO: set world size by config
-        world_size = 2 + 1
+        world_size = 8 + 1
+        print(f"world_size {world_size}, self.rollout_group_size {self.rollout_group_size}")
         backend = 'nccl'
         group_name = 'update_weight'
         print(f"rollout rank {torch.distributed.get_rank() + 1}. {torch.cuda.get_device_name()}")
@@ -219,7 +219,9 @@ class ActorRolloutRefWorker(Worker):
             rank=torch.distributed.get_rank()+1,
             group_name=group_name,
         )
-        print(f"rollout rank {torch.distributed.get_rank()} role: {self.role}, model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
+        self.rollout.set_model_update_group(self._model_update_group)
+        print(f"rollout rank {torch.distributed.get_rank()} role: {self.role}")
+        print(f"model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
 
 
     def _build_model_optimizer(self,
@@ -236,20 +238,6 @@ class ActorRolloutRefWorker(Worker):
         from verl.utils.torch_dtypes import PrecisionType
         from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
-    def _build_model_optimizer(
-        self,
-        model_path,
-        fsdp_config,
-        optim_config,
-        override_model_config,
-        use_remove_padding=False,
-        use_fused_kernels=False,
-        enable_gradient_checkpointing=False,
-        trust_remote_code=False,
-        use_liger=False,
-        role="actor",
-        enable_activation_offload=False,
-    ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -585,7 +573,7 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
-            if self._is_actor:
+            if self._is_actor or self._is_partial_rollout:
                 optim_config = self.config.actor.optim
                 fsdp_config = self.config.actor.fsdp_config
             else:
@@ -634,6 +622,7 @@ class ActorRolloutRefWorker(Worker):
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout(self.replay_buff, trust_remote_code=self.config.model.get("trust_remote_code", False))
             self.rollout.set_tp_group(self.rollout_sharding_manager.get_tp_group())
+            self.rollout_group_size = self.rollout_sharding_manager.global_size
 
         if self._is_ref:
             local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
@@ -682,11 +671,11 @@ class ActorRolloutRefWorker(Worker):
             with Timer(name="update_policy", logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
-            # global_num_tokens = data.meta_info["global_token_num"]
-            # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-            # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-            metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
-            metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+            global_num_tokens = data.meta_info["global_token_num"]
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            metrics["perf/max_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
+            metrics["perf/max_memory_reserved_gb"] = torch.cuda.max_memory_reserved() / (1024**3)
             metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -943,30 +932,19 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(self.actor_optimizer)
 
-    def get_model_shape(self, module, prefix: str = "", visited=None):
-        print(f"get_model_shape: {prefix}")
-        if visited is None:
-            visited = {}
+    def get_model_shape(self):
+        params = self.actor_module_fsdp.state_dict()
+        shape_dict = {}
+        device = torch.cuda.current_device()
+        for name, param in params.items():
+            param_shape = param.to(device, non_blocking=True).full_tensor().shape
+            shape_dict[name] = param_shape
+        print(f"shape dict {shape_dict}")
+        return shape_dict
 
-        for child_name, child_module in module.named_children():
-            child_prefix = f"{prefix}.{child_name}" if prefix else child_name
-            self.get_model_shape(
-                child_module, prefix=child_prefix, visited=visited
-            )  # recurse into the child
+        loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
+        logger.info("vLLM load weights, loaded_params: %d", len(loaded_params))
 
-        if isinstance(module, FSDP) and prefix != "":
-            print(f"get_model_shape into prefix {prefix}, {module}")
-            with FSDP.summon_full_params(module, recurse=False, writeback=False):
-                for param_name, param in module.named_parameters():
-                    full_name = f"{prefix}.{param_name}" if prefix else param_name
-                    print(f"for loop {full_name}")
-                    for extra in ("_fsdp_wrapped_module.", "_checkpoint_wrapped_module."):
-                        full_name = full_name.replace(extra, "")
-
-                    if full_name in visited:
-                        continue  # skip FSDP subtrees already traversed
-                    visited[full_name] = param.data.shape
-        return visited
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def _broadcast_to_vllm_new(self,):
@@ -988,59 +966,35 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def _broadcast_to_vllm(self,):
         # torch.cuda.empty_cache()
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        params = self.actor_module_fsdp.state_dict()
+        device = torch.cuda.current_device()
+        for name, param in params.items():
+            param = param.to(device, non_blocking=True).full_tensor()
+            print(f"actor broadcast to vllm start")
+            print(f"param.data {torch.sum(param.data)}, shape {param.data.shape}, type {param.data.dtype}")
+            if torch.distributed.get_rank() == 0:
+                torch.distributed.broadcast(param.data, 0,
+                                            group=self._model_update_group)
+                print(
+                    f"actor broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}")
+            torch.distributed.barrier()
 
-        with FSDP.summon_full_params(self.actor_module_fsdp, recurse=False, writeback=False):
-            for param_name, param in self.actor_module_fsdp.named_parameters():
-                if torch.distributed.get_rank() == 0:
-                    print(f"actor broadcast to vllm start")
-                    print(f"param.data {torch.sum(param.data)}, shape {param.data.shape}, type {param.data.dtype}")
-
-                    torch.distributed.broadcast(param.data, 0,
-                                                group=self._model_update_group)
-                    print(f"actor broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}")
-
-
-        torch.distributed.barrier()
-        # torch.cuda.empty_cache()
-        # from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
-        # torch_dist_barrier_and_cuda_sync()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def rollout_broadcast_to_vllm(self):
         print(f"rollout broadcast to vllm start")
-
+        self.rollout.inference_engine.wake_up()
         for name, shape in self.fsdp_shape.items():
             print(f"rollout update name {name} shape {shape}")
             weight = torch.empty(shape, dtype=torch.float32, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             print(
                 f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, name {name} shape {shape}")
-            # self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
+
+            self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
+            print(f"rollout update vllm finish name {name}")
             del weight
 
-        # print(f"rollout before broadcast  shape  sum:  "
-        #       f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)
-        # weight = torch.empty((100, 10), device="cuda")
-        # torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-        # print(f"rollout after broadcast finish: shape {weight.shape} sum {torch.sum(weight)}")
-
-        # params = self.actor_module_fsdp.state_dict()
-        # for name, param in params.items():
-        #     # broadcast
-        #     # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-        #     # weight = torch.empty(param.shape, dtype=param.dtype, device="cuda")
-        #     print(f"rollout before broadcast {name}: shape {param.shape} sum: {torch.sum(param)} "
-        #           f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)
-        #     weight = torch.empty((100, 10), device="cuda")
-        #     torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-        #     print(f"rollout after broadcast finish: shape {weight.shape} sum {torch.sum(weight)}")
-        #
-        #     break
-
-        # torch.cuda.empty_cache()
-        # from verl.utils.distributed import torch_dist_barrier_and_cuda_sync
-        # torch_dist_barrier_and_cuda_sync()
 
 class CriticWorker(Worker):
     def __init__(self, config):

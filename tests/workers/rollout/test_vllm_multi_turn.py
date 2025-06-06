@@ -27,7 +27,7 @@ from verl.protocol import DataProto
 
 def init_config() -> DictConfig:
     config = OmegaConf.load("verl/trainer/config/ppo_trainer.yaml")
-    model_path = "Qwen/Qwen2-7B-Instruct"
+    model_path = "/nfs/volume-1615-2/models/Qwen2.5-0.5B"
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.mode = "async"
     config.actor_rollout_ref.rollout.chat_scheduler = "examples.ppo_trainer.naive_chat_scheduler.NaiveChatCompletionScheduler"

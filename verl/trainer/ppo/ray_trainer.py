@@ -853,9 +853,7 @@ class RayPPOTrainer:
         print(f"update weight group init for master {master_address}:{master_port}")
         self.actor_rollout_wg.update_process_group(master_address, master_port)
         self.rollout_wg.rollout_update_process_group(master_address, master_port)
-        print("test broadcast vllm")
-        self.actor_rollout_wg._broadcast_to_vllm()
-        self.rollout_wg.rollout_broadcast_to_vllm()
+        self.rollout_wg.set_extra_info()
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
@@ -863,8 +861,14 @@ class RayPPOTrainer:
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager(
                 config=self.config.actor_rollout_ref,
-                worker_group=self.actor_rollout_wg,
+                worker_group=self.rollout_wg,
             )
+
+        print(f"set set_servers_addr {self.async_rollout_manager.server_addresses}")
+        self.actor_rollout_wg.set_servers_addr(self.async_rollout_manager.server_addresses)
+        print("test broadcast vllm")
+        self.actor_rollout_wg._broadcast_to_vllm()
+        self.rollout_wg.rollout_broadcast_to_vllm()
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`

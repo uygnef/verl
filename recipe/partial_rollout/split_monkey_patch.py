@@ -89,8 +89,15 @@ def fit(self, batch_size):
                 with _timer('gen', timing_raw):
                     print(f"start batch: gen_batch size {gen_batch.batch.batch_size}, raw_prompt_ids batch size {len(gen_batch.non_tensor_batch['raw_prompt_ids'])}")
                     gen_batch1, gen_batch2 = gen_batch.chunk(2)
-                    self.rollout_wg.generate_sequences_partial(gen_batch1)
+                    self.actor_rollout_wg._broadcast_to_vllm()
+                    self.async_rollout_manager.wake_up()
+                    self.async_rollout_manager.generate_sequences(gen_batch1)
                     self.actor_rollout_wg.generate_sequences(gen_batch2)
+                    self.async_rollout_manager.sleep()
+
+
+
+
                 total_batch_nums = 0
                 while total_batch_nums < batch_size:
                     batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],

@@ -79,6 +79,7 @@ from vllm.utils import get_ip, get_open_port
 
 import ray
 from codetiming import Timer
+from verl.workers.sharding_manager.fsdp_vllm import PartialRolloutFSDPVLLMShardingManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -203,6 +204,10 @@ class ActorRolloutRefWorker(Worker):
         )
         self.rollout.set_model_update_group(self._model_update_group)
         print(f"actor rank {torch.distributed.get_rank()} role: {self.role}, model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
+    def set_extra_info(self):
+        self.rollout_sharding_manager.set_extra(self.fsdp_shape, self._model_update_group)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def rollout_update_process_group(self, master_address, master_port):
@@ -449,6 +454,7 @@ class ActorRolloutRefWorker(Worker):
 
         # TODO(sgm): support FSDP hybrid shard for larger model
         infer_tp = self.config.rollout.tensor_model_parallel_size
+        print(f"is partial {self._is_partial_rollout}, tensor_model_parallel_size {self.config.rollout.tensor_model_parallel_size}, infer_tp: {infer_tp}")
         dp = self.world_size // infer_tp
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
         rollout_device_mesh = init_device_mesh(device_name, mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
@@ -496,16 +502,26 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
             full_params = torch.distributed.get_world_size() == 1
-            rollout_sharding_manager = FSDPVLLMShardingManager(
-                module=self.actor_module_fsdp,
-                inference_engine=rollout.inference_engine,
-                model_config=self.actor_model_config,
-                full_params=full_params,
-                device_mesh=rollout_device_mesh,
-                offload_param=self._is_offload_param,
-                load_format=self.config.rollout.load_format,
-                layered_summon=self.config.rollout.get('layered_summon', False),
-            )
+            if self.config.rollout.mode == "sync":
+                rollout_sharding_manager = FSDPVLLMShardingManager(
+                    module=self.actor_module_fsdp,
+                    inference_engine=rollout.inference_engine,
+                    model_config=self.actor_model_config,
+                    full_params=full_params,
+                    device_mesh=rollout_device_mesh,
+                    offload_param=self._is_offload_param,
+                    load_format=self.config.rollout.load_format,
+                    layered_summon=self.config.rollout.get('layered_summon', False),
+                )
+            else:
+                rollout_sharding_manager = FSDPVLLMShardingManager(
+                    module=self.actor_module_fsdp,
+                    inference_engine=rollout.inference_engine,
+                    model_config=self.actor_model_config,
+                    full_params="hf" in self.config.rollout.load_format,
+                    device_mesh=rollout_device_mesh,
+                    offload_param=self._is_offload_param,
+                )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif rollout_name in ["sglang", "sglang_async"]:
@@ -725,45 +741,6 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return True
 
-    @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY, blocking=False)
-    def generate_sequences_partial(self, prompts: DataProto):
-        # Support all hardwares
-        prompts = prompts.to(torch.cuda.current_device())
-
-        assert self._is_rollout
-        if self._is_offload_param:
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-
-        meta_info = {
-            'eos_token_id':
-                self.generation_config.eos_token_id
-                if self.generation_config is not None else self.tokenizer.eos_token_id,
-            'pad_token_id':
-                self.generation_config.pad_token_id
-                if self.generation_config is not None else self.tokenizer.pad_token_id,
-        }
-        prompts.meta_info.update(meta_info)
-        with self.rollout_sharding_manager:
-
-            # after parameters sync with rollout, offload actor model to CPU
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            if self._is_offload_optimizer:
-                offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-
-            log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
-
-            prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-            self.rollout.generate_sequences(prompts=prompts)
-            log_gpu_memory_usage('After rollout generation', logger=logger)
-
-            # output = self.rollout_sharding_manager.postprocess_data(output)
-
-        # output = output.to('cpu')
-
-        # clear kv cache
-        log_gpu_memory_usage('After recompute log prob', logger=logger)
-        return True
 
     @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)
     def partial_generate_sequences(self, prompts: DataProto):
@@ -994,6 +971,10 @@ class ActorRolloutRefWorker(Worker):
             self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
             print(f"rollout update vllm finish name {name}")
             del weight
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_servers_addr(self, server_addr):
+        self.server_addresses = server_addr
 
 
 class CriticWorker(Worker):

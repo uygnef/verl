@@ -341,8 +341,7 @@ class vLLMRollout(BaseRollout):
 
                 # put unfinish to queue
                 self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
-        torch.distributed.barrier()
-        torch.distributed.barrier(self.model_update_group)
+
         if not self.is_partial:
             # free vllm cache engine
             if (
@@ -465,6 +464,29 @@ class vLLMRollout(BaseRollout):
         }, batch_size=batch_size)
         ray.get(self.replay_buffer.put.remote(batch, finished=True))
         print(f"finish put success: {batch_size}")
+
+
+    @torch.no_grad()
+    def send_continue_request(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):
+        idx = idx[continue_respond_idx]
+        attention_mask = attention_mask[continue_respond_idx]
+        position_ids = position_ids[continue_respond_idx]
+        if self.is_partial:
+            print(f"partial put continue size {idx.shape}")
+        else:
+            print(f"origin put continue size {idx.shape}")
+        responses = self.get_items_by_index(responses, continue_respond_idx)
+        raw_prompt_ids = torch.cat([idx.cpu(), torch.tensor(responses)], axis=1)
+        global_sample_id = global_sample_id[continue_respond_idx]
+        data = TensorDict({
+            'raw_prompt_ids': raw_prompt_ids,
+            'idx': idx.cpu(),
+            'attention_mask': attention_mask.cpu(),
+            'position_ids': position_ids.cpu(),
+            'sample_id': global_sample_id.cpu(),
+        }, batch_size=len(continue_respond_idx))
+
+
 
     @torch.no_grad()
     def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):

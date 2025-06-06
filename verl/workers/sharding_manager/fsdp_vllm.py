@@ -291,99 +291,73 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         self.base_sync_done = True
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
 
-    def get_tp_group(self):
-        if self.tp_size == 1:
-            return None
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
-            raise NotImplementedError("not implemented for vllm <= 0.6.3")
-        else:
-            group = vllm_ps.get_tensor_model_parallel_group()
-        return group
+        self.base_sync_done = True
+        logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
 
 
-class PartialRolloutManager:
-    def __init__(self,
-                 inference_engine: LLM,
-                 full_params: bool = False,
-                 device_mesh: DeviceMesh = None):
-        self.inference_engine = inference_engine
-        self.device_mesh = device_mesh
+class PartialRolloutFSDPVLLMShardingManager(FSDPVLLMShardingManager):
 
-        # Full params
-        self.full_params = full_params
+    def set_extra(self, fsdp_shape, model_update_group):
+        self.fsdp_shape = fsdp_shape
+        self._model_update_group = model_update_group
 
-        self.tp_size = vllm_ps.get_tensor_model_parallel_world_size()
-        self.tp_rank = vllm_ps.get_tensor_model_parallel_rank()
-
-        # Note that torch_random_states may be different on each dp rank
-        self.torch_random_states = torch.cuda.get_rng_state()
-        # get a random rng states
-        if self.device_mesh is not None:
-            gen_dp_rank = self.device_mesh['dp'].get_local_rank()
-            torch.cuda.manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
-            self.gen_random_states = torch.cuda.get_rng_state()
-            torch.cuda.set_rng_state(self.torch_random_states)
-        else:
-            self.gen_random_states = None
-
-    def recv_weight(self):
-        return None
-
+    @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __enter__(self):
-        pass
-        # log_gpu_memory_usage('Before state_dict() in sharding manager memory', logger=logger)
-        # params = self.module.state_dict()
-        # log_gpu_memory_usage('After state_dict() in sharding manager memory', logger=logger)
-        # # Copy, not share memory
-        # load_format = None if self.full_params else 'dtensor'
+        # NOTE: Basically, we only need `get_torch_device().empty_cache()` before vllm wake_up and
+        # after vllm sleep, since vllm has its own caching memory allocator CuMemAllocator.
+        # Out of vllm scope, we should avoid empty cache to let pytorch using caching memory
+        # to speed up memory allocations.
         #
-        # self.inference_engine.update_weights_from_tensor([(k, v) for k, v in params.items()], load_format=None)
-        # log_gpu_memory_usage('After sync model weights in sharding manager', logger=logger)
-        #
-        # del params
-        # torch.cuda.empty_cache()
-        # log_gpu_memory_usage('After del state_dict and empty_cache in sharding manager', logger=logger)
-        #
-        # # TODO: offload FSDP model weights
-        # # self.module.cpu()
-        # # torch.cuda.empty_cache()
-        # # if torch.distributed.get_rank() == 0:
-        # # print(f'after model to cpu in sharding manager memory allocated: {torch.cuda.memory_allocated() / 1e9}GB, reserved: {torch.cuda.memory_reserved() / 1e9}GB')
-        #
-        # # important: need to manually set the random states of each tp to be identical.
-        # if self.device_mesh is not None:
-        #     self.torch_random_states = torch.cuda.get_rng_state()
-        #     torch.cuda.set_rng_state(self.gen_random_states)
+        # pytorch: https://pytorch.org/docs/stable/notes/cuda.html#memory-management
+        # vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/device_allocator/cumem.py#L103
+        get_torch_device().empty_cache()
 
+        log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
+        if self.offload_param:
+            load_fsdp_model_to_gpu(self.module)
+
+        log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
+
+        if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+            self.inference_engine.wake_up(tags=["weights"])
+        else:
+            self.inference_engine.wake_up()
+
+        # update model params
+        self.partial_rollout_update_params()
+        log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
+        get_torch_device().empty_cache()
+
+        if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+            self.inference_engine.wake_up(tags=["kv_cache"])
+
+        log_gpu_memory_usage("After del state_dict and empty_cache in sharding manager", logger=logger)
+
+        # important: need to manually set the random states of each tp to be identical.
+        if self.device_mesh is not None:
+            self.torch_random_states = get_torch_device().get_rng_state()
+            get_torch_device().set_rng_state(self.gen_random_states)
+
+    @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        pass
+        # TODO(ZSL): check this
+        # add empty cache after each compute
+        get_torch_device().empty_cache()
 
-    def preprocess_data(self, data: DataProto) -> DataProto:
-        """All gather across tp group to make each rank has identical input."""
-        if self.tp_size == 1:
-            return data
+        # restore random states
+        if self.device_mesh is not None:
+            self.gen_random_states = get_torch_device().get_rng_state()
+            get_torch_device().set_rng_state(self.torch_random_states)
 
-        # TODO: Current impl doesn't consider FSDP with torch micro-dp
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
-            group = vllm_ps.get_tensor_model_parallel_group()
-        else:
-            group = vllm_ps.get_tensor_model_parallel_group().device_group
+    def partial_rollout_update_params(self):
+        print(f"rollout broadcast to vllm start")
+        for name, shape in self.fsdp_shape.items():
+            print(f"rollout update name {name} shape {shape}")
+            weight = torch.empty(shape, dtype=torch.float32, device="cuda")
+            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+            print(
+                f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, name {name} shape {shape}")
 
-        all_gather_data_proto(data=data, process_group=group)
-        return data
-
-    def postprocess_data(self, data: DataProto) -> DataProto:
-        """Get chunk data of this tp rank since we do all gather in preprocess."""
-        if self.tp_size == 1:
-            return data
-
-        return data.chunk(chunks=self.tp_size)[self.tp_rank]
-
-    def get_tp_group(self):
-        if self.tp_size == 1:
-            return None
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
-            raise NotImplementedError("not implemented for vllm <= 0.6.3")
-        else:
-            group = vllm_ps.get_tensor_model_parallel_group()
-        return group
+            self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
+            print(f"rollout update vllm finish name {name}")
+            del weight

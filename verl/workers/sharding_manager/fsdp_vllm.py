@@ -295,6 +295,16 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
 
 
+    def get_tp_group(self):
+        if self.tp_size == 1:
+            return None
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
+            raise NotImplementedError("not implemented for vllm <= 0.6.3")
+        else:
+            group = self.device_mesh['infer_tp'].get_group()
+        return group
+
+
 class PartialRolloutFSDPVLLMShardingManager(FSDPVLLMShardingManager):
 
     def set_extra(self, fsdp_shape, model_update_group):
@@ -361,3 +371,12 @@ class PartialRolloutFSDPVLLMShardingManager(FSDPVLLMShardingManager):
             self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
             print(f"rollout update vllm finish name {name}")
             del weight
+
+    def get_tp_group(self):
+        if self.tp_size == 1:
+            return None
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3'):
+            raise NotImplementedError("not implemented for vllm <= 0.6.3")
+        else:
+            group = self.device_mesh['infer_tp'].get_group()
+        return group

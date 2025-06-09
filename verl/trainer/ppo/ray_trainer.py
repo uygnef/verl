@@ -850,19 +850,18 @@ class RayPPOTrainer:
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model(self.replay_buffer)
+        master_address, master_port = self.actor_rollout_wg.get_master_addr_port()
         print(f"update weight group init for master {master_address}:{master_port}")
         self.actor_rollout_wg.update_process_group(master_address, master_port)
         self.rollout_wg.rollout_update_process_group(master_address, master_port)
         self.rollout_wg.set_extra_info()
 
         # create async rollout manager and request scheduler
-        self.async_rollout_mode = False
-        if self.config.actor_rollout_ref.rollout.mode == "async":
-            self.async_rollout_mode = True
-            self.async_rollout_manager = AsyncLLMServerManager(
-                config=self.config.actor_rollout_ref,
-                worker_group=self.rollout_wg,
-            )
+        self.async_rollout_mode = True
+        self.async_rollout_manager = AsyncLLMServerManager(
+            config=self.config.actor_rollout_ref,
+            worker_group=self.rollout_wg,
+        )
 
         print(f"set set_servers_addr {self.async_rollout_manager.server_addresses}")
         self.actor_rollout_wg.set_servers_addr(self.async_rollout_manager.server_addresses)

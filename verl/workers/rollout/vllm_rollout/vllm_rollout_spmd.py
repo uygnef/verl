@@ -589,3 +589,14 @@ class vLLMAsyncRollout:
             return self.wake_up(*args, **kwargs)
         else:
             return self.inference_engine.execute_method(method, *args, **kwargs)
+
+    @torch.no_grad()
+    def set_tp_group(self, group):
+        from vllm.distributed import GroupCoordinator
+        self.tp_group: GroupCoordinator = group
+
+    @torch.no_grad()
+    def set_model_update_group(self, group):
+        self.model_update_group = group
+
+

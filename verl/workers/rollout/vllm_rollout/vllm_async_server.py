@@ -51,10 +51,13 @@ class ExternalRayDistributedExecutor(Executor):
         # Make sure subprocess in same namespace as parent actor.
         # actor name format: {name_prefix}WorkerDict_{pg_idx}:{local_rank}
         ray.init(namespace=namespace)
-        actor_names = [actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}WorkerDict")]
+        print(f"ray.util.list_named_actors() {ray.util.list_named_actors()}")
+        actor_names = [actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}ActorRolloutRefWorker")]
 
         vllm_tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        assert len(actor_names) == vllm_dp_size * vllm_tp_size, f"instance_id: {self.vllm_config.instance_id} has {len(actor_names)} actors, but vllm_dp_size: {vllm_dp_size} * vllm_tp_size: {vllm_tp_size} = {vllm_dp_size * vllm_tp_size} is expected."
+        assert len(actor_names) == vllm_dp_size * vllm_tp_size, \
+            (f"instance_id: {self.vllm_config.instance_id} has {len(actor_names)} actors, "
+             f"but vllm_dp_size: {vllm_dp_size} * vllm_tp_size: {vllm_tp_size} = {vllm_dp_size * vllm_tp_size} is expected.")
 
         def get_pg_index_and_local_rank(actor_name) -> Tuple[int, int]:
             fields = actor_name.split(":")
@@ -66,7 +69,7 @@ class ExternalRayDistributedExecutor(Executor):
         actor_names = sorted(actor_names, key=get_pg_index_and_local_rank)
         actor_names = actor_names[vllm_dp_rank * vllm_tp_size : (vllm_dp_rank + 1) * vllm_tp_size]
         self.workers: List[WorkerWrapperBase] = [ray.get_actor(actor_name) for actor_name in actor_names]
-        print(f"instance_id: {self.vllm_config.instance_id} intializes with external actors: {actor_names}")
+        print(f"instance_id: {self.vllm_config.instance_id} intializes with external actors: {actor_names}, workers {self.workers}")
 
         kwargs = dict(
             vllm_config=self.vllm_config,

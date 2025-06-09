@@ -15,29 +15,37 @@
 The main entry point to run the PPO algorithm
 """
 
+import json
 import logging
 import os
+import socket
 import warnings
+from dataclasses import asdict
 from typing import Union
 
 import psutil
+import ray
 import torch
 import torch.distributed
+import torch.distributed as dist
 from codetiming import Timer
 from omegaconf import DictConfig, open_dict
+from peft import LoraConfig, TaskType, get_peft_model
+from peft import PeftModel
+from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import verl.utils.torch_functional as verl_F
-from verl.utils.py_functional import convert_to_regular_types
-from omegaconf import DictConfig, open_dict
 from verl import DataProto
 from verl.models.transformers.monkey_patch import apply_monkey_patch
 from verl.single_controller.base import Worker
-from verl.single_controller.base.decorator import Dispatch, register
+from verl.single_controller.base.decorator import Dispatch, register, Execute
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from verl.utils.debug import log_gpu_memory_usage
+from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
 from verl.utils.fsdp_utils import (
@@ -57,28 +65,8 @@ from verl.utils.fsdp_utils import (
 )
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.py_functional import convert_to_regular_types
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
-from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
-
-
-from peft import LoraConfig, TaskType, get_peft_model
-from codetiming import Timer
-
-import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from peft import PeftModel
-from safetensors.torch import save_file
-from dataclasses import asdict
-import json
-
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils import get_ip, get_open_port
-
-import ray
-from codetiming import Timer
 from verl.workers.sharding_manager.fsdp_vllm import PartialRolloutFSDPVLLMShardingManager
 
 logger = logging.getLogger(__file__)
@@ -147,6 +135,8 @@ class ActorRolloutRefWorker(Worker):
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
         self._is_partial_rollout = self.role == 'rollout'
+        if self._is_partial_rollout:
+            self.config.rollout.mode = 'async'
         self._is_offload_param = False
         self._is_offload_optimizer = False
         if self._is_actor:
@@ -212,7 +202,7 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=True)
     def rollout_update_process_group(self, master_address, master_port):
         from verl.utils.distributed import init_process_group
-        world_size = 8 + 1
+        world_size = self.rollout_group_size + 1
         print(f"world_size {world_size}, self.rollout_group_size {self.rollout_group_size}")
         backend = 'nccl'
         group_name = 'update_weight'
@@ -229,20 +219,21 @@ class ActorRolloutRefWorker(Worker):
         print(f"model update group rank {torch.distributed.get_rank(self._model_update_group)},  {torch.cuda.get_device_name()}")
 
 
-    def _build_model_optimizer(self,
-                               model_path,
-                               fsdp_config,
-                               optim_config,
-                               override_model_config,
-                               use_remove_padding=False,
-                               enable_gradient_checkpointing=False,
-                               trust_remote_code=False,
-                               use_liger=False,
-                               role='actor'):
-        from verl.utils.model import print_model_size, update_model_config, get_generation_config
-        from verl.utils.torch_dtypes import PrecisionType
-        from transformers import AutoModelForCausalLM, AutoConfig, AutoModelForVision2Seq
-        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, ShardingStrategy, MixedPrecision, CPUOffload
+    def _build_model_optimizer(
+        self,
+        model_path,
+        fsdp_config,
+        optim_config,
+        override_model_config,
+        use_remove_padding=False,
+        use_fused_kernels=False,
+        enable_gradient_checkpointing=False,
+        trust_remote_code=False,
+        use_liger=False,
+        role="actor",
+        enable_activation_offload=False,
+    ):
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -485,8 +476,8 @@ class ActorRolloutRefWorker(Worker):
                     **lora_kwargs)
             elif vllm_mode == "spmd":
                 from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
-
-                vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
+                vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" and self._is_partial_rollout == False else vLLMAsyncRollout
+                print(f"rollout call {self.config.rollout.mode == 'sync' and self._is_partial_rollout == False}, vllm_rollout_cls {vllm_rollout_cls} ")
                 rollout = vllm_rollout_cls(
                     model_path=local_path,
                     config=self.config.rollout,
@@ -495,14 +486,14 @@ class ActorRolloutRefWorker(Worker):
                     device_mesh=rollout_device_mesh,
                     trust_remote_code=trust_remote_code,
                     replay_buffer=replay_buffer,
-                    is_partial= self.role == 'rollout'
+                    is_partial=self.role == 'rollout',
                     **lora_kwargs)
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
 
             log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
             full_params = torch.distributed.get_world_size() == 1
-            if self.config.rollout.mode == "sync":
+            if self.config.rollout.mode == "sync" and self._is_partial_rollout == False:
                 rollout_sharding_manager = FSDPVLLMShardingManager(
                     module=self.actor_module_fsdp,
                     inference_engine=rollout.inference_engine,
@@ -514,13 +505,15 @@ class ActorRolloutRefWorker(Worker):
                     layered_summon=self.config.rollout.get('layered_summon', False),
                 )
             else:
-                rollout_sharding_manager = FSDPVLLMShardingManager(
+                rollout_sharding_manager = PartialRolloutFSDPVLLMShardingManager(
                     module=self.actor_module_fsdp,
                     inference_engine=rollout.inference_engine,
                     model_config=self.actor_model_config,
-                    full_params="hf" in self.config.rollout.load_format,
+                    full_params=full_params,
                     device_mesh=rollout_device_mesh,
                     offload_param=self._is_offload_param,
+                    load_format=self.config.rollout.load_format,
+                    layered_summon=self.config.rollout.get('layered_summon', False),
                 )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 

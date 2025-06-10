@@ -867,7 +867,7 @@ class RayPPOTrainer:
         self.actor_rollout_wg.set_servers_addr(self.async_rollout_manager.server_addresses)
         print("test broadcast vllm")
         self.actor_rollout_wg._broadcast_to_vllm()
-        self.rollout_wg.rollout_broadcast_to_vllm()
+        self.async_rollout_manager.wake_up()
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -1030,10 +1030,10 @@ class RayPPOTrainer:
                     # generate a batch
                     with _timer("gen", timing_raw):
                         if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+                            self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             self.async_rollout_manager.wake_up()
-                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
+                            self.async_rollout_manager.generate_sequences(gen_batch)
                             self.async_rollout_manager.sleep()
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:

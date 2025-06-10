@@ -953,7 +953,8 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def rollout_broadcast_to_vllm(self):
         print(f"rollout broadcast to vllm start")
-        self.rollout.inference_engine.wake_up()
+        get_torch_device().empty_cache()
+        # self.rollout.inference_engine.wake_up()
         for name, shape in self.fsdp_shape.items():
             print(f"rollout update name {name} shape {shape}")
             weight = torch.empty(shape, dtype=torch.float32, device="cuda")
@@ -1608,9 +1609,8 @@ class RewardModelWorker(Worker):
 
 # ================================= Async related workers =================================
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
-    def _build_rollout(self, trust_remote_code=False):
-        rollout, rollout_sharding_manager = super()._build_rollout(trust_remote_code)
-
+    def _build_rollout(self, replay_buffer=None, trust_remote_code=False):
+        rollout, rollout_sharding_manager = super()._build_rollout(replay_buffer, trust_remote_code)
         # NOTE: rollout is not actually initialized here, it's deferred
         # to be initialized by AsyncvLLMServer.
 
@@ -1629,6 +1629,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+
         """Called by ExternalRayDistributedExecutor collective_rpc."""
         if self.vllm_tp_rank == 0 and method != "execute_model":
             print(f"[DP={self.vllm_dp_rank},TP={self.vllm_tp_rank}] execute_method: {method if isinstance(method, str) else 'Callable'}")

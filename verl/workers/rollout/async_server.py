@@ -299,7 +299,9 @@ class AsyncLLMServerManager:
 
     def wake_up(self):
         """Wake up all vllm instances."""
+        print("call wake up")
         ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+        print("wake up finished")
 
     def sleep(self):
         """Sleep all vllm instances."""

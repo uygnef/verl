@@ -52,7 +52,7 @@ class ExternalRayDistributedExecutor(Executor):
         # actor name format: {name_prefix}WorkerDict_{pg_idx}:{local_rank}
         ray.init(namespace=namespace)
         print(f"ray.util.list_named_actors() {ray.util.list_named_actors()}")
-        actor_names = [actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}ActorRolloutRefWorker")]
+        actor_names = [actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}AsyncActorRolloutRefWorker")]
 
         vllm_tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         assert len(actor_names) == vllm_dp_size * vllm_tp_size, \

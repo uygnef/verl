@@ -558,8 +558,9 @@ class vLLMAsyncRollout:
         self.inference_engine.init_worker(all_kwargs)
 
     def load_model(self, *args, **kwargs):
+        print(f"self.inference_engine.load_model, args {args}, kwargs {kwargs}")
         self.inference_engine.load_model(*args, **kwargs)
-
+        print(f"self.inference_engine.load_model finish")
         # inference engine is intialized now, update sharding manager
         self.sharding_manager.inference_engine = self.inference_engine
         self.sharding_manager.model_runner = self.inference_engine.worker.model_runner
@@ -573,8 +574,9 @@ class vLLMAsyncRollout:
 
     def wake_up(self, *args, **kwargs):
         """Load model weights and build kv cache."""
-        if not self.is_sleep:
-            return
+        print("enter wake_up {}".format(self.is_sleep))
+        # if not self.is_sleep:
+        #     return
         self.sharding_manager.__enter__()  # pylint: disable=C2801
         self.is_sleep = False
 

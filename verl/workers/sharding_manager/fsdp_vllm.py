@@ -361,14 +361,14 @@ class PartialRolloutFSDPVLLMShardingManager(FSDPVLLMShardingManager):
 
     def partial_rollout_update_params(self):
         print(f"rollout broadcast to vllm start")
+        model = self.model_runner.model
         for name, shape in self.fsdp_shape.items():
             print(f"rollout update name {name} shape {shape}")
             weight = torch.empty(shape, dtype=torch.float32, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             print(
                 f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, name {name} shape {shape}")
-
-            self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
+            model.load_weights(weights=[(name, weight)])
             print(f"rollout update vllm finish name {name}")
             del weight
 

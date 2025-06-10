@@ -916,22 +916,6 @@ class ActorRolloutRefWorker(Worker):
         logger.info("vLLM load weights, loaded_params: %d", len(loaded_params))
 
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
-    def _broadcast_to_vllm_new(self,):
-        # self._sync_fsdp_params_to_vllm(self.actor_module_fsdp)
-        params = self.actor_module_fsdp.state_dict()
-
-        if torch.distributed.get_rank() == 0:
-            for name, param in params.items():
-                # broadcast
-                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-                # weight = torch.empty(param.shape, dtype=param.dtype, device="cuda")
-                print(f"actor before broadcast {name}: shape {param.shape} sum: {torch.sum(param)} "
-                      f"update group rank {torch.distributed.get_rank(self._model_update_group)}", flush=True)
-                # torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-                self.pynccl_comm.broadcast(param.data, src=2)
-                print(f"actor after broadcast finish: name {name}")
-                self.pynccl_comm.group.barrier()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def _broadcast_to_vllm(self,):
@@ -948,6 +932,7 @@ class ActorRolloutRefWorker(Worker):
                 print(
                     f"actor broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}")
             torch.distributed.barrier()
+        return True
 
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -962,7 +947,7 @@ class ActorRolloutRefWorker(Worker):
             print(
                 f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, name {name} shape {shape}")
 
-            self.rollout.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model.load_weights(weights=[(name, weight)])
+            self.rollout_sharding_manager.model_runner.model.load_weights(weights=[(name, weight)])
             print(f"rollout update vllm finish name {name}")
             del weight
 

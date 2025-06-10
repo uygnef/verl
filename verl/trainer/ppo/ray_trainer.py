@@ -866,8 +866,9 @@ class RayPPOTrainer:
         print(f"set set_servers_addr {self.async_rollout_manager.server_addresses}")
         self.actor_rollout_wg.set_servers_addr(self.async_rollout_manager.server_addresses)
         print("test broadcast vllm")
-        self.actor_rollout_wg._broadcast_to_vllm()
-        self.async_rollout_manager.wake_up()
+        a = self.actor_rollout_wg._broadcast_to_vllm()
+        self.rollout_wg.rollout_broadcast_to_vllm()
+        a =  ray.get(a)
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`

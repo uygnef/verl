@@ -15,11 +15,12 @@ import asyncio
 from typing import Any, Dict, List
 
 import torch
+from openai.types import Completion
 from openai.types.chat.chat_completion import ChatCompletion
 from tensordict import TensorDict
 
 from verl.protocol import DataProto
-from verl.workers.rollout.async_server import ChatCompletionScheduler
+from verl.workers.rollout.async_server import ChatCompletionScheduler, CompletionScheduler
 
 
 class NaiveChatCompletionScheduler(ChatCompletionScheduler):
@@ -133,3 +134,6 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
         )
 
         return DataProto(batch=batch)
+
+
+

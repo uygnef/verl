@@ -38,10 +38,12 @@ def fit(self, batch_size):
     from verl.utils.tracking import Tracking
     from omegaconf import OmegaConf
 
-    logger = Tracking(project_name=self.config.trainer.project_name,
-                      experiment_name=self.config.trainer.experiment_name,
-                      default_backend=self.config.trainer.logger,
-                      config=OmegaConf.to_container(self.config, resolve=True))
+    logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
 
     self.global_steps = 0
 
@@ -50,11 +52,12 @@ def fit(self, batch_size):
 
     # perform validation before training
     # currently, we only support validation using the reward_function.
-    if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
+    if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
         val_metrics = self._validate()
-        pprint(f'Initial validation metrics: {val_metrics}')
+        assert val_metrics, f"{val_metrics=}"
+        pprint(f"Initial validation metrics: {val_metrics}")
         logger.log(data=val_metrics, step=self.global_steps)
-        if self.config.trainer.get('val_only', False):
+        if self.config.trainer.get("val_only", False):
             return
     # add tqdm
     progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
@@ -70,16 +73,19 @@ def fit(self, batch_size):
             batch: DataProto = DataProto.from_single_dict(batch_dict)
 
             # pop those keys for generation
-            if 'multi_modal_inputs' in batch.non_tensor_batch.keys():
-                gen_batch = batch.pop(
-                    batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                    non_tensor_batch_keys=['raw_prompt_ids', 'multi_modal_data', 'multi_modal_inputs'],
-                )
-            else:
-                gen_batch = batch.pop(
-                    batch_keys=['input_ids', 'attention_mask', 'position_ids'],
-                    non_tensor_batch_keys=['raw_prompt_ids'],
-                )
+            batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+            if "multi_modal_data" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("multi_modal_data")
+            if "raw_prompt" in batch.non_tensor_batch:
+                print(f"batch.non_tensor_batch: {batch.non_tensor_batch}")
+                non_tensor_batch_keys_to_pop.append("raw_prompt")
+            if "tools_kwargs" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("tools_kwargs")
+            gen_batch = batch.pop(
+                batch_keys=batch_keys_to_pop,
+                non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+            )
             gen_batch.batch['sample_id'] = torch.unsqueeze(
                 torch.range(0, list(batch.batch.batch_size)[0] - 1, dtype=torch.long), dim=-1)
             is_last_step = self.global_steps >= self.total_training_steps
@@ -89,13 +95,11 @@ def fit(self, batch_size):
                 with _timer('gen', timing_raw):
                     print(f"start batch: gen_batch size {gen_batch.batch.batch_size}, raw_prompt_ids batch size {len(gen_batch.non_tensor_batch['raw_prompt_ids'])}")
                     gen_batch1, gen_batch2 = gen_batch.chunk(2)
-                    self.actor_rollout_wg._broadcast_to_vllm()
-                    self.async_rollout_manager.wake_up()
+                    a = self.actor_rollout_wg._broadcast_to_vllm()
+                    self.rollout_wg.rollout_broadcast_to_vllm()
+                    a = ray.get(a)
                     self.async_rollout_manager.generate_sequences(gen_batch1)
                     self.actor_rollout_wg.generate_sequences(gen_batch2)
-                    self.async_rollout_manager.sleep()
-
-
 
 
                 total_batch_nums = 0
@@ -203,7 +207,7 @@ def fit(self, batch_size):
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
 
-                if self.config.trainer.save_freq > 0 and (is_last_step or \
+                if self.config.trainer.save_freq > 0 and (is_last_step or
                                                           self.global_steps % self.config.trainer.save_freq == 0):
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()

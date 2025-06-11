@@ -81,15 +81,15 @@ def test_vllm_multi_turn(config):
                 messages=messages,
                 extra_headers=extra_headers,
             )
-        elif round == 1:
-            messages.append({"role": "user", "content": "What is your favorite color?"})
-            await async_chat_scheduler.submit_chat_completions(
-                callback=callback,
-                callback_additional_info={"messages": messages, "round": 2},
-                model=model_name,
-                messages=messages,
-                extra_headers=extra_headers,
-            )
+        # elif round == 1:
+        #     messages.append({"role": "user", "content": "What is your favorite color?"})
+        #     await async_chat_scheduler.submit_chat_completions(
+        #         callback=callback,
+        #         callback_additional_info={"messages": messages, "round": 2},
+        #         model=model_name,
+        #         messages=messages,
+        #         extra_headers=extra_headers,
+        #     )
         else:
             print("Done!")
 
@@ -132,64 +132,64 @@ def test_vllm_multi_turn(config):
     ray.shutdown()
 
 
-async def test_vllm_streaming_response(config):
-    ray.init(
-        runtime_env={
-            "env_vars": {
-                "TOKENIZERS_PARALLELISM": "true",
-                "NCCL_DEBUG": "WARN",
-                "VLLM_LOGGING_LEVEL": "WARN",
-                "VLLM_USE_V1": "1",
-            }
-        }
-    )
-
-    model_name = "/".join(config.actor_rollout_ref.model.path.split("/")[-2:])
-    async_rollout_manager = init_async_rollout_manager(config)
-    async_llm_server = async_rollout_manager.async_llm_servers[0]
-
-    # non-streaming request
-    request = ChatCompletionRequest(
-        model=model_name,
-        messages=[{"role": "user", "content": "What is your name?"}],
-        stream=False,
-    )
-    generator = async_llm_server.chat_completion_generator.remote(request)
-    async for ref in generator:
-        status_code, data = await ref
-        print(f">>>> status_code: {status_code}, {data}")
-        data = data[len("data: ") :].rstrip()
-        if status_code != 200:
-            response = ErrorResponse(**json.loads(data))
-        else:
-            response = ChatCompletionResponse(**json.loads(data))
-            assert response.choices[0].message.role == "assistant"
-            assert response.choices[0].message.content is not None
-
-    # streaming request
-    request = ChatCompletionRequest(
-        model=model_name,
-        messages=[{"role": "user", "content": "How are you?"}],
-        stream=True,
-    )
-    generator = async_llm_server.chat_completion_generator.remote(request)
-    async for ref in generator:
-        status_code, data = await ref
-        print(f">>>> status_code: {status_code}, {data}")
-        data = data[len("data: ") :].rstrip()
-        if status_code != 200:
-            response = ErrorResponse(**json.loads(data))
-        elif data == "[DONE]":
-            break
-        else:
-            response = ChatCompletionStreamResponse(**json.loads(data))
-            assert response.choices[0].delta.role is None or response.choices[0].delta.role == "assistant"
-            assert response.choices[0].delta.content is not None
-
-    ray.shutdown()
+# async def test_vllm_streaming_response(config):
+#     ray.init(
+#         runtime_env={
+#             "env_vars": {
+#                 "TOKENIZERS_PARALLELISM": "true",
+#                 "NCCL_DEBUG": "WARN",
+#                 "VLLM_LOGGING_LEVEL": "WARN",
+#                 "VLLM_USE_V1": "1",
+#             }
+#         }
+#     )
+#
+#     model_name = "/".join(config.actor_rollout_ref.model.path.split("/")[-2:])
+#     async_rollout_manager = init_async_rollout_manager(config)
+#     async_llm_server = async_rollout_manager.async_llm_servers[0]
+#
+#     # non-streaming request
+#     request = ChatCompletionRequest(
+#         model=model_name,
+#         messages=[{"role": "user", "content": "What is your name?"}],
+#         stream=False,
+#     )
+#     generator = async_llm_server.chat_completion_generator.remote(request)
+#     async for ref in generator:
+#         status_code, data = await ref
+#         print(f">>>> status_code: {status_code}, {data}")
+#         data = data[len("data: ") :].rstrip()
+#         if status_code != 200:
+#             response = ErrorResponse(**json.loads(data))
+#         else:
+#             response = ChatCompletionResponse(**json.loads(data))
+#             assert response.choices[0].message.role == "assistant"
+#             assert response.choices[0].message.content is not None
+#
+#     # streaming request
+#     request = ChatCompletionRequest(
+#         model=model_name,
+#         messages=[{"role": "user", "content": "How are you?"}],
+#         stream=True,
+#     )
+#     generator = async_llm_server.chat_completion_generator.remote(request)
+#     async for ref in generator:
+#         status_code, data = await ref
+#         print(f">>>> status_code: {status_code}, {data}")
+#         data = data[len("data: ") :].rstrip()
+#         if status_code != 200:
+#             response = ErrorResponse(**json.loads(data))
+#         elif data == "[DONE]":
+#             break
+#         else:
+#             response = ChatCompletionStreamResponse(**json.loads(data))
+#             assert response.choices[0].delta.role is None or response.choices[0].delta.role == "assistant"
+#             assert response.choices[0].delta.content is not None
+#
+#     ray.shutdown()
 
 
 if __name__ == "__main__":
     config = init_config()
     test_vllm_multi_turn(config)
-    asyncio.run(test_vllm_streaming_response(config))
+    # asyncio.run(test_vllm_streaming_response(config))

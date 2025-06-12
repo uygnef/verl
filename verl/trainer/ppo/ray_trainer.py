@@ -966,7 +966,7 @@ class RayPPOTrainer:
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
 
-    def fit(self,):
+    def fit(self):
         """
         The training loop of PPO.
         The driver process only need to call the compute functions of the worker group through RPC
@@ -1031,10 +1031,10 @@ class RayPPOTrainer:
                     # generate a batch
                     with _timer("gen", timing_raw):
                         if not self.async_rollout_mode:
-                            self.actor_rollout_wg.generate_sequences(gen_batch)
+                            gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
                         else:
                             self.async_rollout_manager.wake_up()
-                            self.async_rollout_manager.generate_sequences(gen_batch)
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                             self.async_rollout_manager.sleep()
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -1056,7 +1056,7 @@ class RayPPOTrainer:
                     batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    # batch = batch.union(gen_batch_output)
+                    batch = batch.union(gen_batch_output)
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1064,11 +1064,9 @@ class RayPPOTrainer:
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     # TODO: Decouple the DP balancing and mini-batching.
-                    # if self.config.trainer.balance_batch:
-                    #     self._balance_batch(batch, metrics=metrics)
+                    if self.config.trainer.balance_batch:
+                        self._balance_batch(batch, metrics=metrics)
 
-                    batch_size = self.databatch_manager.get_batch(batch_size=self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
-                    print(f"get_batch size {batch_size}", )
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
@@ -1083,18 +1081,9 @@ class RayPPOTrainer:
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
-                    # TODO: check this
-                    # batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-                    batch.batch = TensorDict({"xx": torch.ones(4,1)})
-                    batch.meta_info['partial_batch_size'] = batch_size
-                    print(f"batch info : {batch}")
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-
-                        new_none_tensor_batch = self.databatch_manager.get_none_tensor(old_log_prob.batch, batch.non_tensor_batch)
-                        batch = old_log_prob
-                        batch.non_tensor_batch = new_none_tensor_batch
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode

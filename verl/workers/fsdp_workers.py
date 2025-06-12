@@ -732,7 +732,7 @@ class ActorRolloutRefWorker(Worker):
 
         # clear kv cache
         get_torch_device().empty_cache()
-        return True
+        return output
 
 
     @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)

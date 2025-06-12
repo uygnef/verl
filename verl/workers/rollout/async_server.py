@@ -20,7 +20,7 @@ import socket
 import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, List, Tuple, Type
+from typing import Any, Callable, Dict, List, Tuple, Type, AsyncIterator
 from uuid import uuid4
 
 import aiohttp
@@ -445,6 +445,9 @@ class AsyncLLMServerManager:
         return future.result()
 
 
+
+
+
 def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
     """Get async server class.
 
@@ -464,3 +467,70 @@ def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
         return AsyncSglangServer
     else:
         raise NotImplementedError
+
+class PartialRolloutAsyncLLMServerManager(AsyncLLMServerManager):
+
+    def _init_chat_scheduler(self):
+        self.chat_scheduler_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.chat_scheduler_loop)
+
+        module_path, class_name = self.config.rollout.chat_scheduler.rsplit(".", 1)
+        module = importlib.import_module(module_path)
+        scheduler_cls = getattr(module, class_name)
+
+        self.chat_scheduler = scheduler_cls(
+            config=self.config.rollout,
+            model_path=self.config.model.path,
+            server_addresses=self.server_addresses,
+            **self.scheduler_kwargs,
+        )
+
+        self.chat_scheduler_ready.set()
+        self.chat_scheduler_loop.run_forever()
+        self._iterator = None
+        self._current_batch = None
+
+
+    def start_generation(self, batch: DataProto, **sampling_params):
+        """Start generation process and prepare for iteration."""
+        assert self.chat_scheduler is not None, "chat scheduler is not initialized."
+        self._current_batch = batch
+        self._sampling_params = sampling_params
+
+        # 在调度器线程中启动生成任务
+        asyncio.run_coroutine_threadsafe(
+            self._prepare_iterator(),
+            self.chat_scheduler_loop
+        )
+
+    async def _prepare_iterator(self):
+        """Prepare the iterator in the scheduler's event loop."""
+        self._iterator = await self.chat_scheduler.generate_sequences(
+            self._current_batch,
+            **self._sampling_params
+        )
+
+    def __aiter__(self):
+        """Make the manager an async iterator."""
+        return self
+
+    async def __anext__(self):
+        """Get the next item from the iterator."""
+        if self._iterator is None:
+            raise StopAsyncIteration
+
+        try:
+            # 从调度器线程获取下一个结果
+            future = asyncio.run_coroutine_threadsafe(
+                self._iterator.__anext__(),
+                self.chat_scheduler_loop
+            )
+            return await asyncio.wrap_future(future)
+        except StopAsyncIteration:
+            self._iterator = None
+            self._current_batch = None
+            raise
+        except Exception as e:
+            self._iterator = None
+            self._current_batch = None
+            raise e

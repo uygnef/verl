@@ -21,7 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 from openai.types.chat.chat_completion import ChatCompletion
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ChatCompletionResponse, ChatCompletionStreamResponse, ErrorResponse
 
-from tests.workers.rollout.async_rollout_utils import init_async_rollout_manager
+from tests.workers.rollout.async_rollout_utils import init_async_rollout_manager, init_async_rollout_iter_manager
 from verl.protocol import DataProto
 
 
@@ -132,64 +132,154 @@ def test_vllm_multi_turn(config):
     ray.shutdown()
 
 
-# async def test_vllm_streaming_response(config):
-#     ray.init(
-#         runtime_env={
-#             "env_vars": {
-#                 "TOKENIZERS_PARALLELISM": "true",
-#                 "NCCL_DEBUG": "WARN",
-#                 "VLLM_LOGGING_LEVEL": "WARN",
-#                 "VLLM_USE_V1": "1",
-#             }
-#         }
-#     )
-#
-#     model_name = "/".join(config.actor_rollout_ref.model.path.split("/")[-2:])
-#     async_rollout_manager = init_async_rollout_manager(config)
-#     async_llm_server = async_rollout_manager.async_llm_servers[0]
-#
-#     # non-streaming request
-#     request = ChatCompletionRequest(
-#         model=model_name,
-#         messages=[{"role": "user", "content": "What is your name?"}],
-#         stream=False,
-#     )
-#     generator = async_llm_server.chat_completion_generator.remote(request)
-#     async for ref in generator:
-#         status_code, data = await ref
-#         print(f">>>> status_code: {status_code}, {data}")
-#         data = data[len("data: ") :].rstrip()
-#         if status_code != 200:
-#             response = ErrorResponse(**json.loads(data))
-#         else:
-#             response = ChatCompletionResponse(**json.loads(data))
-#             assert response.choices[0].message.role == "assistant"
-#             assert response.choices[0].message.content is not None
-#
-#     # streaming request
-#     request = ChatCompletionRequest(
-#         model=model_name,
-#         messages=[{"role": "user", "content": "How are you?"}],
-#         stream=True,
-#     )
-#     generator = async_llm_server.chat_completion_generator.remote(request)
-#     async for ref in generator:
-#         status_code, data = await ref
-#         print(f">>>> status_code: {status_code}, {data}")
-#         data = data[len("data: ") :].rstrip()
-#         if status_code != 200:
-#             response = ErrorResponse(**json.loads(data))
-#         elif data == "[DONE]":
-#             break
-#         else:
-#             response = ChatCompletionStreamResponse(**json.loads(data))
-#             assert response.choices[0].delta.role is None or response.choices[0].delta.role == "assistant"
-#             assert response.choices[0].delta.content is not None
-#
-#     ray.shutdown()
+async def test_vllm_streaming_response(config):
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "WARN",
+                "VLLM_USE_V1": "1",
+            }
+        }
+    )
+
+    model_name = "/".join(config.actor_rollout_ref.model.path.split("/")[-2:])
+    async_rollout_manager = init_async_rollout_manager(config)
+    async_llm_server = async_rollout_manager.async_llm_servers[0]
+
+    # non-streaming request
+    request = ChatCompletionRequest(
+        model=model_name,
+        messages=[{"role": "user", "content": "What is your name?"}],
+        stream=False,
+    )
+    generator = async_llm_server.chat_completion_generator.remote(request)
+    async for ref in generator:
+        status_code, data = await ref
+        print(f">>>> status_code: {status_code}, {data}")
+        data = data[len("data: ") :].rstrip()
+        if status_code != 200:
+            response = ErrorResponse(**json.loads(data))
+        else:
+            response = ChatCompletionResponse(**json.loads(data))
+            assert response.choices[0].message.role == "assistant"
+            assert response.choices[0].message.content is not None
+
+    # streaming request
+    request = ChatCompletionRequest(
+        model=model_name,
+        messages=[{"role": "user", "content": "How are you?"}],
+        stream=True,
+    )
+    generator = async_llm_server.chat_completion_generator.remote(request)
+    async for ref in generator:
+        status_code, data = await ref
+        print(f">>>> status_code: {status_code}, {data}")
+        data = data[len("data: ") :].rstrip()
+        if status_code != 200:
+            response = ErrorResponse(**json.loads(data))
+        elif data == "[DONE]":
+            break
+        else:
+            response = ChatCompletionStreamResponse(**json.loads(data))
+            assert response.choices[0].delta.role is None or response.choices[0].delta.role == "assistant"
+            assert response.choices[0].delta.content is not None
+
+    ray.shutdown()
+
+
+def test_vllm_iterator(config):
+    ray.init(
+        runtime_env={
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
+                "VLLM_LOGGING_LEVEL": "WARN",
+                "VLLM_USE_V1": "1",
+            }
+        }
+    )
+
+    # =========================== 1. Init rollout manager ===========================
+    model_name = "/".join(config.actor_rollout_ref.model.path.split("/")[-2:])
+    async_rollout_manager = init_async_rollout_iter_manager(config)
+
+    # test sleep and wake_up
+    async_rollout_manager.sleep()
+    async_rollout_manager.wake_up()
+
+    async_chat_scheduler = async_rollout_manager.chat_scheduler
+
+    # =========================== 2. Multi turn rollout  ===========================
+    async def callback(completions: ChatCompletion, info: Dict[str, Any], exception: Exception):
+        assert exception is None, f"exception: {exception}"
+        messages, round = info["messages"], info["round"]
+        message = completions.choices[0].message
+        messages.append({"role": message.role, "content": message.content})
+        print(f"[round={round}] role: {message.role}, content: {message.content}")
+
+        extra_headers = {"x-request-id": completions.id}
+        if round == 0:
+            messages.append({"role": "user", "content": "What is your name?"})
+            await async_chat_scheduler.submit_chat_completions(
+                callback=callback,
+                callback_additional_info={"messages": messages, "round": 1},
+                model=model_name,
+                messages=messages,
+                extra_headers=extra_headers,
+            )
+        # elif round == 1:
+        #     messages.append({"role": "user", "content": "What is your favorite color?"})
+        #     await async_chat_scheduler.submit_chat_completions(
+        #         callback=callback,
+        #         callback_additional_info={"messages": messages, "round": 2},
+        #         model=model_name,
+        #         messages=messages,
+        #         extra_headers=extra_headers,
+        #     )
+        else:
+            print("Done!")
+
+    messages = [{"role": "user", "content": "Let's play a role playing game. Your name is Bob, your favorite color is red."}]
+    async_rollout_manager.submit_chat_completions(
+        callback=callback,
+        callback_additional_info={"messages": messages, "round": 0},
+        model=model_name,
+        messages=messages,
+    )
+    assert len(messages) == 6
+    for round, message in enumerate(messages):
+        if round % 2 == 0:
+            assert message["role"] == "user"
+        else:
+            assert message["role"] == "assistant"
+
+    # =========================== 3. Generate sequences  ===========================
+    raw_prompts = [
+        [
+            {
+                "role": "user",
+                "content": "Let's play a role playing game. Your name is Alice, your favorite color is blue.",
+            }
+        ],
+        [{"role": "user", "content": "Let's play a role playing game. Your name is Bob, your favorite color is red."}],
+    ]
+    batch = DataProto(
+        non_tensor_batch={
+            "raw_prompt": np.array(raw_prompts),
+        },
+    )
+    async_rollout_manager.start_generation(prompts=batch)
+    for batch_index, completion in async_rollout_manager:
+        print(f"Batch {batch_index}: {completion}")
+
+    ray.shutdown()
 
 
 if __name__ == "__main__":
     config = init_config()
-    test_vllm_multi_turn(config)
+    config.actor_rollout_ref.rollout.chat_scheduler = "examples.ppo_trainer.naive_chat_scheduler.ChatCompletionSchedulerIterator"
+
+    test_vllm_iterator(config)
     # asyncio.run(test_vllm_streaming_response(config))

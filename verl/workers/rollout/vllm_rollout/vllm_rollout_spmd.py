@@ -329,38 +329,20 @@ class vLLMRollout(BaseRollout):
                 position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
                 global_sample_id = _repeat_interleave(global_sample_id, self.sampling_params.n)
 
-            if self.tp_group.is_first_rank:  # rollout tp first rank put data to replay buffer
-                finish_response_idx, continue_respond_idx = self.get_finish_index(outputs, eos_token_id)
-                response = []
-                for output in outputs:
-                    for sample_id in range(len(output.outputs)):
-                        response.append(output.outputs[sample_id].token_ids)
+            finish_response_idx, continue_respond_idx = self.get_finish_index(outputs, eos_token_id)
+            response = []
+            for output in outputs:
+                for sample_id in range(len(output.outputs)):
+                    response.append(output.outputs[sample_id].token_ids)
+
+            if torch.distributed.get_rank(self.tp_group) == 0:  # rollout tp first rank put data to replay buffer
                 # put finish to queue
                 self.put_finish_data(response, finish_response_idx, idx,
                                      attention_mask, position_ids, global_sample_id, eos_token_id)
 
-                # put unfinish to queue
-                self.put_continue_data(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
+            self.inference_engine.free_cache_engine()
+        return self.make_continue_dataproto(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
 
-        if not self.is_partial:
-            # free vllm cache engine
-            if (
-                    vllm_version
-                    in (
-                    "0.5.4",
-                    "0.6.3",
-            )
-                    and self.config.free_cache_engine
-            ):
-                self.inference_engine.free_cache_engine()
-        else:
-            self.partial_generate_sequences()
-
-
-        # if self.tp_group.is_first_rank:
-        #     batch = ray.get(self.replay_buffer.get.remote('actor_update'))
-        #     print(f"finsih batch is {batch}")
-        print("finish")
 
     @torch.no_grad()
     def partial_generate_sequences(self,):
@@ -467,14 +449,10 @@ class vLLMRollout(BaseRollout):
 
 
     @torch.no_grad()
-    def send_continue_request(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):
+    def make_continue_dataproto(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):
         idx = idx[continue_respond_idx]
         attention_mask = attention_mask[continue_respond_idx]
         position_ids = position_ids[continue_respond_idx]
-        if self.is_partial:
-            print(f"partial put continue size {idx.shape}")
-        else:
-            print(f"origin put continue size {idx.shape}")
         responses = self.get_items_by_index(responses, continue_respond_idx)
         raw_prompt_ids = torch.cat([idx.cpu(), torch.tensor(responses)], axis=1)
         global_sample_id = global_sample_id[continue_respond_idx]
@@ -485,8 +463,11 @@ class vLLMRollout(BaseRollout):
             'position_ids': position_ids.cpu(),
             'sample_id': global_sample_id.cpu(),
         }, batch_size=len(continue_respond_idx))
+        return data
 
-
+    @torch.no_grad()
+    def call_rollout_server(self, data: TensorDict):
+        pass
 
     @torch.no_grad()
     def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):
@@ -507,6 +488,7 @@ class vLLMRollout(BaseRollout):
             'position_ids': position_ids.cpu(),
             'sample_id': global_sample_id.cpu(),
         }, batch_size=len(continue_respond_idx))
+
         ray.get(self.replay_buffer.put.remote(data, finished=False))
 
 

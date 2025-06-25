@@ -382,7 +382,7 @@ class RayPPOTrainer:
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
-        self.databatch_manager = DataBatchManager()
+        self.databatch_manager = DataBatchManager(self.config, self.tokenizer)
         self.replay_buffer = self.databatch_manager.replay_buffer
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
@@ -861,6 +861,7 @@ class RayPPOTrainer:
         self.async_rollout_manager = AsyncLLMServerManager(
             config=self.config.actor_rollout_ref,
             worker_group=self.rollout_wg,
+            replay_buffer=self.replay_buffer
         )
 
         print(f"set set_servers_addr {self.async_rollout_manager.server_addresses}")

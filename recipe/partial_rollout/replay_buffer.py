@@ -7,23 +7,6 @@ import unittest
 import torch
 from tensordict import TensorDict
 
-
-@ray.remote
-class ReplayBufferLock:
-    def __init__(self):
-        self.locked = False
-
-    def acquire(self) -> None:
-        """获取锁"""
-        while self.locked:
-            pass
-        self.locked = True
-
-    def release(self) -> None:
-        """释放锁"""
-        self.locked = False
-
-
 @ray.remote
 class DistributedReplayBuffer:
     def __init__(self, max_size: int = 10000, eos_token: str = '[EOS]'):
@@ -40,6 +23,7 @@ class DistributedReplayBuffer:
         self.finish_queue = Queue()
         self.continue_queue = Queue()
         self.total_samples = 0
+
 
     def put_batch(self, data_list: TensorDict, finished: bool) -> None:
         """
@@ -58,6 +42,23 @@ class DistributedReplayBuffer:
             self.continue_queue.put_nowait(data_list)
             # print(f"rank : put to continue_queue {self.continue_queue.qsize()}", flush=True)
 
+    def put_item(self, data: Any, finished: bool) -> None:
+        """
+        将数据放入 Replay Buffer
+
+        Args:
+            data: 要存储的数据
+            finished: 数据是否完成（包含 eos）
+        """
+        if finished:
+            # 如果是完成的数据，放入 finish 队列
+            self.finish_queue.put_nowait(data)
+            print(f"rank : put {len(data['respond'])} to finish {self.finish_queue.qsize()}", flush=True)
+        else:
+            # 如果是未完成的数据，放入 continue 队列
+            self.continue_queue.put_nowait(data)
+            print(f"rank : put {len(data['respond'])} to continue_queue {self.continue_queue.qsize()}", flush=True)
+
     def put(self, data: Any, finished: bool) -> None:
         """
         将数据放入 Replay Buffer
@@ -70,11 +71,9 @@ class DistributedReplayBuffer:
             # 如果是完成的数据，放入 finish 队列
             self.finish_queue.put_nowait(data)
             self.total_samples += list(data.batch_size)[0]
-            print(f"rank : put {data.batch_size} to finish {self.finish_queue.qsize()}", flush=True)
         else:
             # 如果是未完成的数据，放入 continue 队列
             self.continue_queue.put_nowait(data)
-            print(f"rank : put {data.batch_size} to continue_queue {self.continue_queue.qsize()}", flush=True)
 
     def get(self, consumer_type: str, batch_size: int = 1) -> Optional[Any]:
         """
@@ -123,9 +122,14 @@ class DistributedReplayBuffer:
     def empty(self) -> bool:
         return self.continue_queue.empty()
 
+    def get_all_data(self, finish):
+        if finish:
+            queue = self.finish_queue
+        else:
+            queue = self.continue_queue
+        data_nums = queue.qsize()
+        return queue.get_nowait_batch(data_nums)
 
-    def get_continue_size(self) -> int:
-        return self.continue_queue.qsize()
 
     def finish_size(self):
         return self.finish_queue.qsize()

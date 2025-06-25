@@ -203,6 +203,7 @@ class vLLMRollout(BaseRollout):
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
 
+        self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
         self.countinue_keys = ['raw_prompt_ids', 'idx', 'attention_mask', 'position_ids', 'sample_id']
 
@@ -231,26 +232,137 @@ class vLLMRollout(BaseRollout):
     def set_model_update_group(self, group):
         self.model_update_group = group
 
+    # @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
+    # @torch.no_grad()
+    # def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+    #     # rebuild vllm cache engine
+    #     if (
+    #         vllm_version
+    #         in (
+    #             "0.5.4",
+    #             "0.6.3",
+    #         )
+    #         and self.config.free_cache_engine
+    #     ):
+    #         self.inference_engine.init_cache_engine()
+    #
+    #     idx = prompts.batch["input_ids"]  # (bs, prompt_length)
+    #     # left-padded attention_mask
+    #     attention_mask = prompts.batch["attention_mask"]
+    #     position_ids = prompts.batch["position_ids"]
+    #     global_sample_id = prompts.batch["sample_id"]
+    #     uid = prompts.non_tensor_batch['uid']
+    #     # used to construct attention_mask
+    #     eos_token_id = prompts.meta_info["eos_token_id"]
+    #     self.eos_token_id = eos_token_id
+    #
+    #     batch_size = idx.size(0)
+    #
+    #     non_tensor_batch = prompts.non_tensor_batch
+    #     if "raw_prompt_ids" not in non_tensor_batch:
+    #         non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
+    #
+    #     if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
+    #         raise RuntimeError("vllm sharding manager is not work properly.")
+    #
+    #     if "multi_modal_data" in non_tensor_batch:
+    #         vllm_inputs = []
+    #         for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")):
+    #             vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
+    #     else:
+    #         vllm_inputs = [{"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")]
+    #
+    #     # ensure the type of `prompt_token_ids` passed to vllm is list[int]
+    #     # https://github.com/volcengine/verl/pull/772
+    #     for input_data in vllm_inputs:
+    #         if isinstance(input_data["prompt_token_ids"], np.ndarray):
+    #             input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
+    #         elif not isinstance(input_data["prompt_token_ids"], list):
+    #             raise TypeError(f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+    #
+    #     do_sample = prompts.meta_info.get("do_sample", True)
+    #     is_validate = prompts.meta_info.get("validate", False)
+    #     if not do_sample:
+    #         kwargs = {
+    #             "best_of": 1,
+    #             "top_p": 1.0,
+    #             "top_k": -1,
+    #             "min_p": 0.0,
+    #             "temperature": 0,
+    #             "n": 1,  # if greedy, only 1 response
+    #         }
+    #     elif is_validate:
+    #         # TODO: try **
+    #         kwargs = {
+    #             "top_k": self.config.val_kwargs.top_k,
+    #             "top_p": self.config.val_kwargs.top_p,
+    #             "temperature": self.config.val_kwargs.temperature,
+    #             "n": 1,  # if validate, already repeat in ray_trainer
+    #         }
+    #     else:
+    #         # TODO: auto adjust
+    #         kwargs['max_tokens'] = 200
+    #
+    #     lora_requests = None
+    #     if self.lora_kwargs:
+    #         lora_int_ids = list(self.inference_engine.llm_engine.list_loras())
+    #         if len(lora_int_ids) > 0:
+    #             lora_int_id=lora_int_ids[0]
+    #             lora_requests = [LoRARequest(lora_name=f"{lora_int_id}",lora_int_id=lora_int_id,lora_path="/simon-stub-path")] * batch_size
+    #
+    #     # users can customize different sampling_params at different run
+    #     rank = torch.distributed.get_rank()
+    #     with self.update_sampling_params(**kwargs):
+    #         # if self.tp_group.is_first_rank:
+    #         #     ray.get(self.replay_buffer.put.remote(vllm_inputs, finished=False))
+    #         #     vllm_inputs = ray.get(self.replay_buffer.get.remote('generate'))
+    #         outputs = self.inference_engine.generate(
+    #             prompts=vllm_inputs,  # because we have already convert it to prompt token id
+    #             sampling_params=self.sampling_params,
+    #             lora_request=lora_requests,
+    #             use_tqdm=False,
+    #         )
+    #
+    #         # TODO(sgm): disable logprob when recompute_log_prob is enable
+    #         if self.sampling_params.n > 1 and do_sample:
+    #             idx = _repeat_interleave(idx, self.sampling_params.n)
+    #             attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
+    #             position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
+    #             global_sample_id = _repeat_interleave(global_sample_id, self.sampling_params.n)
+    #             uid = _repeat_interleave(uid, self.sampling_params.n)
+    #
+    #         finish_response_idx, continue_respond_idx = self.get_finish_index(outputs, eos_token_id)
+    #         response = []
+    #         for output in outputs:
+    #             for sample_id in range(len(output.outputs)):
+    #                 response.append(output.outputs[sample_id].token_ids)
+    #
+    #         if torch.distributed.get_rank(self.tp_group) == 0:  # rollout tp first rank put data to replay buffer
+    #             # put finish to queue
+    #             self.put_finish_data(response, finish_response_idx, idx,
+    #                                  attention_mask, position_ids, global_sample_id, eos_token_id)
+    #
+    #         self.inference_engine.reset_prefix_cache()
+    #
+    #     return self.make_continue_dataproto(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
+
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # rebuild vllm cache engine
         if (
-            vllm_version
-            in (
+                vllm_version
+                in (
                 "0.5.4",
                 "0.6.3",
-            )
-            and self.config.free_cache_engine
+        )
+                and self.config.free_cache_engine
         ):
             self.inference_engine.init_cache_engine()
-
+        print("vllm gen start")
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         # left-padded attention_mask
-        attention_mask = prompts.batch["attention_mask"]
-        position_ids = prompts.batch["position_ids"]
-        global_sample_id = prompts.batch["sample_id"]
-
+        uid = prompts.non_tensor_batch['uid']
         # used to construct attention_mask
         eos_token_id = prompts.meta_info["eos_token_id"]
         self.eos_token_id = eos_token_id
@@ -259,17 +371,20 @@ class vLLMRollout(BaseRollout):
 
         non_tensor_batch = prompts.non_tensor_batch
         if "raw_prompt_ids" not in non_tensor_batch:
-            non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
+            non_tensor_batch["raw_prompt_ids"] = np.array(
+                [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
 
         if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
             raise RuntimeError("vllm sharding manager is not work properly.")
 
         if "multi_modal_data" in non_tensor_batch:
             vllm_inputs = []
-            for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")):
+            for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop("raw_prompt_ids"),
+                                                        non_tensor_batch.pop("multi_modal_data")):
                 vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
         else:
-            vllm_inputs = [{"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")]
+            vllm_inputs = [{"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in
+                           non_tensor_batch.pop("raw_prompt_ids")]
 
         # ensure the type of `prompt_token_ids` passed to vllm is list[int]
         # https://github.com/volcengine/verl/pull/772
@@ -277,7 +392,8 @@ class vLLMRollout(BaseRollout):
             if isinstance(input_data["prompt_token_ids"], np.ndarray):
                 input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
             elif not isinstance(input_data["prompt_token_ids"], list):
-                raise TypeError(f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+                raise TypeError(
+                    f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
@@ -306,15 +422,14 @@ class vLLMRollout(BaseRollout):
         if self.lora_kwargs:
             lora_int_ids = list(self.inference_engine.llm_engine.list_loras())
             if len(lora_int_ids) > 0:
-                lora_int_id=lora_int_ids[0]
-                lora_requests = [LoRARequest(lora_name=f"{lora_int_id}",lora_int_id=lora_int_id,lora_path="/simon-stub-path")] * batch_size
+                lora_int_id = lora_int_ids[0]
+                lora_requests = [LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id,
+                                             lora_path="/simon-stub-path")] * batch_size
 
         # users can customize different sampling_params at different run
-        rank = torch.distributed.get_rank()
+        print(f"rollout kwargs: {kwargs}")
         with self.update_sampling_params(**kwargs):
-            # if self.tp_group.is_first_rank:
-            #     ray.get(self.replay_buffer.put.remote(vllm_inputs, finished=False))
-            #     vllm_inputs = ray.get(self.replay_buffer.get.remote('generate'))
+            print(f"vllm_inputs is: {vllm_inputs}.")
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
@@ -323,25 +438,28 @@ class vLLMRollout(BaseRollout):
             )
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
-            if self.sampling_params.n > 1 and do_sample:
-                idx = _repeat_interleave(idx, self.sampling_params.n)
-                attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
-                position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
-                global_sample_id = _repeat_interleave(global_sample_id, self.sampling_params.n)
-
-            finish_response_idx, continue_respond_idx = self.get_finish_index(outputs, eos_token_id)
-            response = []
-            for output in outputs:
+            continue_respond, finish_respond = [], []
+            continue_uid, finish_uid = [], []
+            for output_id, output in enumerate(outputs):
                 for sample_id in range(len(output.outputs)):
-                    response.append(output.outputs[sample_id].token_ids)
+                    token_id = output.outputs[sample_id].token_ids
+                    if token_id[-1] == eos_token_id:
+                        finish_respond.append(token_id)
+                        print(f"rollout uid {uid}, sample_id {sample_id}")
+                        finish_uid.append(uid[output_id])
+                    else:
+                        new_respond = self.tokenizer.decode(token_id)
+                        continue_respond.append(new_respond)
+                        continue_uid.append(uid[output_id])
+                        print(f"continue rollout uid: {uid[output_id]}, sample_id: {sample_id}, output_id: {output_id}, token_id: {token_id}")
 
             if torch.distributed.get_rank(self.tp_group) == 0:  # rollout tp first rank put data to replay buffer
                 # put finish to queue
-                self.put_finish_data(response, finish_response_idx, idx,
-                                     attention_mask, position_ids, global_sample_id, eos_token_id)
+                self.put_repaly_buffer(finish_respond, finish_uid, True)
+                self.put_repaly_buffer(continue_respond, continue_uid, False)
 
-            self.inference_engine.free_cache_engine()
-        return self.make_continue_dataproto(response, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id)
+            self.inference_engine.reset_prefix_cache()
+
 
 
     @torch.no_grad()
@@ -393,13 +511,15 @@ class vLLMRollout(BaseRollout):
     def get_finish_index(self, outputs, eos_token_id):
         finish_response_ids = []
         continue_response_ids = []
-        for output in outputs:
+        for output_id, output in enumerate(outputs):
             for sample_id in range(len(output.outputs)):
                 current_respond = output.outputs[sample_id].token_ids
+                print(f"current_respond: {current_respond}, eos_token_id:{eos_token_id}")
                 if current_respond[-1] == eos_token_id: # if respond is finish
-                    finish_response_ids.append(sample_id)
+                    finish_response_ids.append((output_id, sample_id))
                 else:
-                    continue_response_ids.append(sample_id)
+                    continue_response_ids.append((output_id, sample_id))
+        print(f"finish_response_ids: {finish_response_ids}, continue_response_ids: {continue_response_ids}")
         return finish_response_ids, continue_response_ids
 
     def get_items_by_index(self, data_list, index):
@@ -466,8 +586,10 @@ class vLLMRollout(BaseRollout):
         return data
 
     @torch.no_grad()
-    def call_rollout_server(self, data: TensorDict):
-        pass
+    def put_repaly_buffer(self, responses, uid, finish):
+        for id, respond in zip(uid, responses):
+            item = {'uid': id, 'respond': respond}
+            ray.get(self.replay_buffer.put_item.remote(item, finished=finish))
 
     @torch.no_grad()
     def put_continue_data(self, responses, continue_respond_idx, idx, attention_mask, position_ids, global_sample_id):
@@ -497,11 +619,8 @@ class vLLMRollout(BaseRollout):
         if data is not None:
             result = []
             for key in self.countinue_keys:
-                print(f"key {key}, type: {data[key].type()}, shape {data[key].shape}")
                 result.append(data[key].shape)
             tensor_shape = torch.tensor(result)
-            print(f"src rank {torch.distributed.get_rank()} / {src_rank} tensor_shape type {tensor_shape.dtype} tensor {tensor_shape}")
-        
             self._communicate_shapes(src_rank, tensor_shape)
         else:
             tensor_shape = self._communicate_shapes(src_rank)

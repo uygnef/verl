@@ -680,12 +680,12 @@ class ActorRolloutRefWorker(Worker):
             with Timer(name="update_policy", logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
-            global_num_tokens = data.meta_info["global_token_num"]
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-            metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
-            metrics["perf/max_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
-            metrics["perf/max_memory_reserved_gb"] = torch.cuda.max_memory_reserved() / (1024**3)
-            metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
+            # global_num_tokens = data.meta_info["global_token_num"]
+            # estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            # metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
+            # metrics["perf/max_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / (1024**3)
+            # metrics["perf/max_memory_reserved_gb"] = torch.cuda.max_memory_reserved() / (1024**3)
+            # metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr
@@ -709,6 +709,7 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_DISPATCH_ONLY)
     def generate_sequences(self, prompts: DataProto, replay_buffer=None):
         # Support all hardwares
+        print("actor start gen")
         prompts = prompts.to(get_torch_device().current_device())
 
         assert self._is_rollout
@@ -732,6 +733,7 @@ class ActorRolloutRefWorker(Worker):
 
         # clear kv cache
         get_torch_device().empty_cache()
+        print("actor start end")
         return output
 
 
@@ -767,15 +769,11 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
 
-    @register(dispatch_mode=Dispatch.DP_COLLECT_ONLY)
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
-        partial_batch_size = data.meta_info['partial_batch_size']
-        data = DataProto()
-        data.batch = ray.get(self.replay_buff.get.remote('actor_update', partial_batch_size))
-        print(f"data in compute batch size {partial_batch_size}")
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -810,9 +808,9 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         # fy todo:
-        print(f"compute log ", output)
+        # print(f"compute log ", output)
         log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
-        output = output.union(data)
+        # output = output.union(data)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

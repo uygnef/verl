@@ -71,43 +71,58 @@ def fit(self, batch_size):
             timing_raw = {}
 
             batch: DataProto = DataProto.from_single_dict(batch_dict)
-
+            batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
+                                                     dtype=object)
             # pop those keys for generation
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
             if "multi_modal_data" in batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("multi_modal_data")
             if "raw_prompt" in batch.non_tensor_batch:
-                print(f"batch.non_tensor_batch: {batch.non_tensor_batch}")
                 non_tensor_batch_keys_to_pop.append("raw_prompt")
             if "tools_kwargs" in batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
+            if "uid" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("uid")
+            if "full_prompts" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("full_prompts")
+
             gen_batch = batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
+
             gen_batch.batch['sample_id'] = torch.unsqueeze(
                 torch.range(0, list(batch.batch.batch_size)[0] - 1, dtype=torch.long), dim=-1)
+            # gen_batch.non_tensor_batch["uid"] = batch.non_tensor_batch["uid"]
             is_last_step = self.global_steps >= self.total_training_steps
 
             with _timer('step', timing_raw):
+                gen_batch1, gen_batch2 = self.databatch_manager.init_data_batch(gen_batch, [1,1])
+
                 # generate a batch
                 with _timer('gen', timing_raw):
-                    print(f"start batch: gen_batch size {gen_batch.batch.batch_size}, raw_prompt_ids batch size {len(gen_batch.non_tensor_batch['raw_prompt_ids'])}")
-                    gen_batch1, gen_batch2 = gen_batch.chunk(2)
-                    a = self.actor_rollout_wg._broadcast_to_vllm()
-                    self.rollout_wg.rollout_broadcast_to_vllm()
-                    a = ray.get(a)
-                    self.async_rollout_manager.generate_sequences(gen_batch1)
-                    self.actor_rollout_wg.generate_sequences(gen_batch2)
+                    print(f"start batch: gen_batch size {gen_batch.batch.batch_size}, "
+                          f"raw_prompt_ids batch size {len(gen_batch.non_tensor_batch['raw_prompt_ids'])}")
+                    # a = self.actor_rollout_wg._broadcast_to_vllm()
+                    # self.rollout_wg.rollout_broadcast_to_vllm()
+                    # a = ray.get(a)
+                    prompts = gen_batch1.non_tensor_batch['raw_prompt']
+                    uid = gen_batch1.non_tensor_batch['uid']
+                    self.async_rollout_manager.generate_sequences(prompts, uid)
 
+                    print(f"gen_batch2 {gen_batch2}")
+                    result = self.actor_rollout_wg.generate_sequences(gen_batch2)
+                    print(f"actor output {result}")
+                    # partial rollout
+                    partial_prompts, partial_uid, offset = self.databatch_manager.preprocess()
+                    print(f"partial_prompts: {partial_prompts}, partial_uid: {partial_uid}, offset: {offset}")
+                    self.async_rollout_manager.generate_sequences(partial_prompts, partial_uid, offset, 1, self.config.actor_rollout_ref.rollout.response_length - 200)
 
                 total_batch_nums = 0
                 while total_batch_nums < batch_size:
-                    batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                                                             dtype=object)
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    # batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     # batch = batch.union(gen_batch_output)
 
                     # balance the number of valid tokens on each dp rank.
@@ -116,34 +131,35 @@ def fit(self, batch_size):
                     # if self.config.trainer.balance_batch:
                     #     self._balance_batch(batch, metrics=metrics)
 
-                    batch_nums = self.databatch_manager.get_batch_num(
-                        batch_size=self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
-                    print(f"get_batch_num nums {batch_nums} batch size", total_batch_nums)
-                    if batch_nums == 0:
-                        time.sleep(3)
-                        print("0 batch num sleep 3 seconds")
-                        continue
-                    total_batch_nums += batch_nums
+                    # batch_nums = self.databatch_manager.get_batch_num(
+                    #     batch_size=self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+                    # print(f"get_batch_num nums {batch_nums} batch size", total_batch_nums)
+                    # if batch_nums == 0:
+                    #     time.sleep(3)
+                    #     print("0 batch num sleep 3 seconds")
+                    #     continue
+                    # total_batch_nums += batch_nums
 
                     with _timer('get_batch', timing_raw):
-                        data = DataProto()
-                        data.batch = ray.get(self.replay_buffer.get.remote('actor_update',
-                                                                         batch_nums * self.config.actor_rollout_ref.actor.ppo_mini_batch_size))
-                        print(f"get batch data")
-
+                        print(f"get batch data {total_batch_nums} vs {batch_size}")
+                        data = self.databatch_manager.get_batch(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+                        total_batch_nums += self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                        print(f"after get batch data {total_batch_nums} vs {batch_size}")
+                        print(f"data batch keys : {data.batch.keys()}")
                     # recompute old_log_probs
                     with _timer('old_log_prob', timing_raw):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(data)
-                        new_none_tensor_batch = self.databatch_manager.get_none_tensor(old_log_prob.batch,
-                                                                                       batch.non_tensor_batch)
-                        batch = old_log_prob
-                        batch.non_tensor_batch = new_none_tensor_batch
+                        new_none_tensor_batch = self.databatch_manager.get_none_tensor(batch.non_tensor_batch)
+                        micro_batch = data.union(old_log_prob)
+                        micro_batch.non_tensor_batch = new_none_tensor_batch
+                        print(f"old_log_prob data batch keys : {micro_batch.batch.keys()}")
 
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with _timer('ref', timing_raw):
-                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
+                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(micro_batch)
+                            micro_batch = micro_batch.union(ref_log_prob)
+                        print(f"ref_log_prob data batch keys : {micro_batch.batch.keys()}")
 
                     # compute values
                     # if self.use_critic:
@@ -161,38 +177,43 @@ def fit(self, batch_size):
                         #     batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
-                        reward_tensor = self.reward_fn(batch)
-                        batch.batch['token_level_scores'] = reward_tensor
+                        reward_tensor = self.reward_fn(micro_batch)
+                        micro_batch.batch['token_level_scores'] = reward_tensor
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward,
+                            micro_batch, kl_metrics = apply_kl_penalty(micro_batch, kl_ctrl=self.kl_ctrl_in_reward,
                                                                  kl_penalty=self.config.algorithm.kl_penalty)
                             metrics.update(kl_metrics)
                         else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                            micro_batch.batch["token_level_rewards"] = micro_batch.batch["token_level_scores"]
 
                         # compute advantages, executed on the driver process
-                        batch = compute_advantage(batch,
+                        micro_batch = compute_advantage(micro_batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n)
+                        print(f"compute_advantage data batch keys : {micro_batch.batch.keys()}")
+
 
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
-                            critic_output = self.critic_wg.update_critic(batch)
+                            critic_output = self.critic_wg.update_critic(micro_batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
+                        print(f"critic_output data batch keys : {micro_batch.batch.keys()}")
+
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with _timer('update_actor', timing_raw):
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_output = self.actor_rollout_wg.update_actor(micro_batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
+
 
                 with _timer("sync_rollout_weights", timing_raw):
                     self.actor_rollout_wg._broadcast_to_vllm()
@@ -211,17 +232,17 @@ def fit(self, batch_size):
                                                           self.global_steps % self.config.trainer.save_freq == 0):
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()
+                # collect metrics
+                micro_batch.meta_info['global_token_num'] = torch.sum(micro_batch.batch['attention_mask'], dim=-1).tolist()
+                metrics.update(compute_data_metrics(batch=micro_batch, use_critic=self.use_critic))
+                print(f"compute_timing_metrics data batch keys : {micro_batch.batch.keys()}")
+                metrics.update(compute_timing_metrics(batch=micro_batch, timing_raw=timing_raw))
+                # TODO: implement actual tflpo and theoretical tflpo
+                n_gpus = self.resource_pool_manager.get_n_gpus()
+                metrics.update(compute_throughout_metrics(batch=micro_batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
-            # collect metrics
-            batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
-            metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
-            metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
-            # TODO: implement actual tflpo and theoretical tflpo
-            n_gpus = self.resource_pool_manager.get_n_gpus()
-            metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
-
-            # TODO: make a canonical logger that supports various backend
-            logger.log(data=metrics, step=self.global_steps)
+                # TODO: make a canonical logger that supports various backend
+                logger.log(data=metrics, step=self.global_steps)
 
             if is_last_step:
                 pprint(f'Final validation metrics: {last_val_metrics}')

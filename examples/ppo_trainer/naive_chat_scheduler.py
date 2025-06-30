@@ -48,7 +48,6 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
             kwargs["temperature"] = 0
 
         kwargs.update(sampling_params)
-        print(f"[NaiveChatCompletionScheduler] generate_sequences sampling params: {kwargs}")
 
         async def callback(completions: ChatCompletion, info: Dict[str, Any], exception: Exception):
             assert exception is None, f"exception: {exception}"
@@ -89,7 +88,6 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
                 )
             )
         await asyncio.gather(*tasks)
-        print("[NaiveChatCompletionScheduler] generate_sequences done")
 
         return self._postprocess(batch, batch_conversations, kwargs["n"])
 
@@ -102,40 +100,26 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
             temperature=self.config.temperature,
             top_p=self.config.top_p,
         )
-        if offset:
-            print(f"offset is : {offset}, prompts : {prompts}, response length: {response_length}, rollout_n: {rollout_n}, uid: {uid}")
         kwargs.update(sampling_params)
-        print(f"[NaiveChatCompletionScheduler] generate_sequences sampling params: {kwargs}")
 
         async def callback(completions: ChatCompletion, info: Dict[str, Any], exception: Exception):
             assert exception is None, f"exception: {exception}"
 
-            print(f"id {info['batch_index']},choice.message.content: {completions.choices}, len: {len(completions.choices)}, "
-                  f"result {[choice.message.content for choice in completions.choices]}", flush=True)
             for i, choice in enumerate(completions.choices):
-                print(f"offset: {offset}, info['batch_index']: {info['batch_index']}, choice.message.content: {choice.message.content}")
                 data = {
                     "uid": uid[info["batch_index"]],
                     "respond": self.tokenizer.encode(choice.message.content),
                     "offset": offset[info["batch_index"]] if offset is not None else i,
                     "partial": '1' if offset is not None else '0',
                 }
-                print(f"_postprocess_item: {data}, ", flush=True)
                 ray.get(self.replay_buffer.put_item.remote(data, finished=True))
-
-            # return info["batch_index"], [choice.message.content for choice in completions.choices]
 
         tasks = []
         batch_conversations = [None] * len(prompts)
         for batch_index, conversation in enumerate(prompts):
             extra_headers = {}
             if offset is not None:
-                print(f"before: partial batch_index {batch_index},  conversation {conversation}")
                 conversation = np.array(self.convert_text_to_messages(conversation))
-                print(f"after: partial batch_index {batch_index}, conversation {conversation}, type {type(conversation[0])}")
-            else:
-                print(f"origin batch_index {batch_index},  conversation {conversation}, type {type(conversation[0])}")
-
 
             extra_headers['x-request-id'] = uid[batch_index]
             task = asyncio.create_task(
@@ -154,9 +138,6 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
 
         for coro in asyncio.as_completed(tasks):
             await coro
-            if offset is not None:
-                print("partial finish")
-        print("[NaiveChatCompletionScheduler] generate_sequences done")
 
     def convert_text_to_messages(self, text):
         messages = []
@@ -201,7 +182,6 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
                 "respond": respond,
                 "offset": offset if offset else i
             }
-            print(f"_postprocess_item: {data}", flush=True)
             ray.get(self.replay_buffer.put_item.remote(data, finished=True))
 
 

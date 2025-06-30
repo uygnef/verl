@@ -67,17 +67,17 @@ class DataBatchManager:
             print("no data in finish queue")
             for k, v in self.respond_store.items():
                 print(f"left key: {k}, value: {v}, len: {len(v)}")
-            time.sleep(2)
+            time.sleep(1)
             return
         for data in finish_data:
             uid = data['uid']
-            print(f"data is {data}")
             if 'partial' not in data or data['partial'] == '0': # finish without cut
                 self.respond_store[uid].append(data['respond'])
+                # print(f"without partial: {data['respond']}")
+
             else:
-                print(f"manager data is {data}, self.prompt_store[uid]['respond']L {self.prompt_store[uid]['respond']}")
                 self.respond_store[uid].append(self.tokenizer.encode(self.prompt_store[uid]['respond'][data['offset']]) + data['respond'])
-                print(f"uid {uid}, self.respond_store[uid]: {self.respond_store[uid]}")
+                # print(f"uid {uid}, part: {self.tokenizer.encode(self.prompt_store[uid]['respond'][data['offset']])}, part2: {data['respond']}")
             if len(self.respond_store[uid]) == self.config.actor_rollout_ref.rollout.n:
                 self.result.put({'uid': uid,  'respond': self.respond_store[uid]})
                 del self.respond_store[uid]
@@ -107,7 +107,6 @@ class DataBatchManager:
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device='cpu')
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
-        print(f"global_sample_id: {uid_index}")
 
         attention_mask = self.data_batch.batch['attention_mask'][uid_index]
         prompts =  self.data_batch.batch['input_ids'][uid_index]
@@ -134,12 +133,6 @@ class DataBatchManager:
         data = DataProto()
         data.batch = batch
         return data
-
-    def get_batch_num(self, batch_size):
-        buffer_size = ray.get(self.replay_buffer.get_sample_nums.remote())
-        print(f"get buffer_size", buffer_size)
-        total_size = buffer_size - buffer_size % batch_size
-        return total_size // batch_size
 
 
     def get_none_tensor(self, none_tensor_data):

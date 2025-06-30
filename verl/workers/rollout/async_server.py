@@ -205,7 +205,7 @@ class ChatCompletionScheduler:
                 json=chat_complete_request,
             ) as resp:
                 data = await resp.json()
-                print(f"_chat_completions_aiohttp, chat_complete_request{chat_complete_request}, data {data}")
+                # print(f"_chat_completions_aiohttp, chat_complete_request{chat_complete_request}, data {data}")
                 return ChatCompletion(**data)
         finally:
             await session.close()

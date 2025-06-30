@@ -178,13 +178,16 @@ class ActorRolloutRefWorker(Worker):
             master_port = sock.getsockname()[1]
         return master_address, master_port
 
+
+
     @register(execute_mode=Execute.RANK_ZERO, blocking=False)
-    def update_process_group(self, master_address, master_port):
+    def update_process_group(self, master_address, master_port, rollout_group_size):
         from verl.utils.distributed import init_process_group
         # TODO: set by config
-        world_size = self.rollout_group_size + 1
+        world_size = rollout_group_size + 1
         backend = 'nccl'
         group_name = 'update_weight'
+        print(f"actor rank {torch.distributed.get_rank()}, global_size {torch.distributed.get_world_size()}, master_address: {master_address}, master_port: {master_port}")
         self._model_update_group = init_process_group(
             backend=backend,
             init_method=f"tcp://{master_address}:{master_port}",
@@ -907,7 +910,7 @@ class ActorRolloutRefWorker(Worker):
         for name, param in params.items():
             param_shape = param.to(device, non_blocking=True).full_tensor().shape
             shape_dict[name] = param_shape
-        print(f"shape dict {shape_dict}")
+        print(f"shape_dict {shape_dict}")
         return shape_dict
 
         loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
@@ -922,31 +925,24 @@ class ActorRolloutRefWorker(Worker):
         device = torch.cuda.current_device()
         for name, param in params.items():
             param = param.to(device, non_blocking=True).full_tensor()
-            print(f"actor broadcast to vllm start")
-            print(f"param.data {torch.sum(param.data)}, shape {param.data.shape}, type {param.data.dtype}")
             if torch.distributed.get_rank() == 0:
                 torch.distributed.broadcast(param.data, 0,
                                             group=self._model_update_group)
-                print(
-                    f"actor broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}")
             torch.distributed.barrier()
         return True
 
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def rollout_broadcast_to_vllm(self):
-        print(f"rollout broadcast to vllm start")
         get_torch_device().empty_cache()
         # self.rollout.inference_engine.wake_up()
         for name, shape in self.fsdp_shape.items():
-            print(f"rollout update name {name} shape {shape}")
             weight = torch.empty(shape, dtype=torch.float32, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             print(
                 f"rollout broadcast to vllm finish, update group rank {torch.distributed.get_rank(self._model_update_group)}, name {name} shape {shape}")
 
             self.rollout_sharding_manager.model_runner.model.load_weights(weights=[(name, weight)])
-            print(f"rollout update vllm finish name {name}")
             del weight
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

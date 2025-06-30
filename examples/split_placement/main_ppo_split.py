@@ -26,10 +26,18 @@ from verl.utils.reward_score import gsm8k, math
 
 
 def _select_rm_score_fn(data_source):
-    if data_source == "openai/gsm8k":
+    if data_source == 'openai/gsm8k':
         return gsm8k.compute_score
-    elif data_source == "lighteval/MATH":
+    elif data_source == 'lighteval/MATH':
         return math.compute_score
+    elif "multiply" in data_source or "arithmetic" in data_source:
+        return multiply.compute_score
+    elif "countdown" in data_source:
+        return countdown.compute_score
+    elif "kk" in data_source:
+        return kk.compute_score
+    elif "numina" in data_source or "aime" in data_source or "deepscaler" in data_source:
+        return numina_math_verify.compute_score
     else:
         raise NotImplementedError
 

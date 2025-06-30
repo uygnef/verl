@@ -429,7 +429,8 @@ class RayPPOTrainer:
     def _validate_config(self):
         config = self.config
         # number of GPUs total
-        n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
+        trainer_n_gpus = config.trainer.n_gpus_per_node * config.trainer.actor.nnodes
+        n_gpus = trainer_n_gpus
 
         # 1. Check total batch size for data correctness
         real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
@@ -851,9 +852,11 @@ class RayPPOTrainer:
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model(self.replay_buffer)
         master_address, master_port = self.actor_rollout_wg.get_master_addr_port()
+        self.actor_rollout_wg.test_rank()
         print(f"update weight group init for master {master_address}:{master_port}")
-        self.actor_rollout_wg.update_process_group(master_address, master_port)
-        self.rollout_wg.rollout_update_process_group(master_address, master_port)
+        a = self.actor_rollout_wg.update_process_group(master_address, master_port)
+        self.rollout_wg.rollout_update_process_group(master_address, master_port, self.rollout_wg.rollout_group_size)
+        ray.get(a)
         self.rollout_wg.set_extra_info()
 
         # create async rollout manager and request scheduler

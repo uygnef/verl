@@ -416,7 +416,7 @@ class vLLMRollout(BaseRollout):
             }
         else:
             # TODO: auto adjust
-            kwargs['max_tokens'] = 200
+            kwargs['max_tokens'] = 2000
 
         lora_requests = None
         if self.lora_kwargs:
@@ -443,15 +443,15 @@ class vLLMRollout(BaseRollout):
             for output_id, output in enumerate(outputs):
                 for sample_id in range(len(output.outputs)):
                     token_id = output.outputs[sample_id].token_ids
-                    if token_id[-1] == eos_token_id:
+                    if len(token_id) < 1000:
                         finish_respond.append(token_id)
-                        print(f"rollout uid {uid}, sample_id {sample_id}")
+                        print(f"origin rollout uid {uid[output_id]}, sample_id {sample_id}, token_id: {token_id}")
                         finish_uid.append(uid[output_id])
                     else:
                         new_respond = self.tokenizer.decode(token_id)
                         continue_respond.append(new_respond)
                         continue_uid.append(uid[output_id])
-                        print(f"continue rollout uid: {uid[output_id]}, sample_id: {sample_id}, output_id: {output_id}, token_id: {token_id}")
+                        print(f"continue rollout uid: {uid[output_id]}, sample_id: {sample_id}, token_id: {token_id}, new_respond: {new_respond}")
 
             if torch.distributed.get_rank(self.tp_group) == 0:  # rollout tp first rank put data to replay buffer
                 # put finish to queue

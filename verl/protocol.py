@@ -686,6 +686,58 @@ class DataProto:
 
         return output
 
+
+    def split(self, ratios: List[int]) -> List["DataProto"]:
+        """按照给定比例在 dim=0 维度上拆分数据。
+
+        Args:
+            ratios (List[int]): 拆分比例列表，例如 [3,4] 表示两份，分别占总量的 3/7 和 4/7。
+
+        Returns:
+            List[DataProto]: 拆分后的 DataProto 列表。
+        """
+        total_len = len(self)
+        if total_len == 0:
+            return [type(self)(batch=None, non_tensor_batch={}, meta_info=self.meta_info)
+                    for _ in ratios]
+
+        # 计算每份的目标大小（四舍五入），并让最后一份吸收多余或不足
+        sum_ratios = sum(ratios)
+        sizes = [int(round(r / sum_ratios * total_len)) for r in ratios]
+        adjustment = total_len - sum(sizes)
+        sizes[-1] += adjustment  # 把差值加到最后一份上
+
+        # 计算分割后的索引点
+        split_indices = np.cumsum(sizes)[:-1]
+
+        # 拆分张量批次
+        if self.batch is not None:
+            # 假设 self.batch 支持 torch.split
+            batch_lst = list(torch.split(self.batch, sizes, dim=0))
+        else:
+            batch_lst = [None] * len(ratios)
+
+        # 拆分非张量批次（numpy ndarray）
+        non_tensor_batch_lst = [{} for _ in ratios]
+        for key, val in self.non_tensor_batch.items():
+            assert isinstance(val, np.ndarray), f"{key} must be a numpy array"
+            parts = np.array_split(val, split_indices.tolist())
+            for i, part in enumerate(parts):
+                non_tensor_batch_lst[i][key] = part
+
+        # 组装输出
+        outputs: List[DataProto] = []
+        for i in range(len(ratios)):
+            outputs.append(
+                type(self)(
+                    batch=batch_lst[i],
+                    non_tensor_batch=non_tensor_batch_lst[i],
+                    meta_info=self.meta_info
+                )
+            )
+        return outputs
+
+
     @staticmethod
     def concat(data: List["DataProto"]) -> "DataProto":
         """Concat a list of DataProto. The batch is concatenated among dim=0.

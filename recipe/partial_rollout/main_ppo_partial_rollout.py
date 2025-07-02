@@ -20,10 +20,13 @@ import os
 import hydra
 import ray
 
+from verl.protocol import DataProtoConfig
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 
 from recipe.partial_rollout.split_monkey_patch import fit
+
+DataProtoConfig.auto_padding = True
 
 def get_custom_reward_fn(config):
     import importlib.util

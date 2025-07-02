@@ -24,9 +24,12 @@ import torch
 from tqdm import tqdm
 
 from verl import DataProto
+from verl.protocol import DataProtoConfig
 from verl.trainer.ppo.metric_utils import compute_throughout_metrics
 from verl.trainer.ppo.ray_trainer import compute_advantage, apply_kl_penalty, reduce_metrics, compute_data_metrics, \
     _timer, compute_timing_metrics
+
+DataProtoConfig.auto_padding = True
 
 
 def fit(self, batch_size):
@@ -37,6 +40,7 @@ def fit(self, batch_size):
     """
     from verl.utils.tracking import Tracking
     from omegaconf import OmegaConf
+    DataProtoConfig.auto_padding = True
 
     logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -98,7 +102,8 @@ def fit(self, batch_size):
             is_last_step = self.global_steps >= self.total_training_steps
 
             with _timer('step', timing_raw):
-                gen_batch1, gen_batch2 = self.databatch_manager.init_data_batch(gen_batch, [4,1])
+                gen_batch1, gen_batch2 = self.databatch_manager.init_data_batch(
+                    gen_batch, [self.config.trainer.rollout.nnodes, self.config.trainer.actor.nnodes])
 
                 # generate a batch
                 with _timer('gen', timing_raw):

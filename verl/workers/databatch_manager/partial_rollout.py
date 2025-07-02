@@ -35,18 +35,8 @@ class DataBatchManager:
     def init_data_batch(self, batch: DataProto, rate: List[int]):
         for i, uid in enumerate(batch.non_tensor_batch['uid']):
             self.prompt_store[uid] = {"prompt": batch.non_tensor_batch['full_prompts'][i], "respond": [], "sample_id": i}
-        assert len(batch.batch) % sum(rate) == 0, f"batch length should divide by sum of rate, now is {len(batch.batch)} vs {sum(rate)}"
-        all_chunk = batch.chunk(sum(rate))
-        actor_chunk = all_chunk[:rate[0]]
-        actor_data_proto = actor_chunk[0]
         self.data_batch = batch
-        for i in actor_chunk[1:]:
-            actor_data_proto = actor_data_proto.union(i)
-
-        rollout_chunck = all_chunk[rate[0]:]
-        rollout_data_proto = rollout_chunck[0]
-        for i in rollout_chunck[1:]:
-            rollout_data_proto = rollout_data_proto.union(i)
+        actor_data_proto, rollout_data_proto = batch.split(rate)
         return actor_data_proto, rollout_data_proto
 
     def preprocess(self):
@@ -66,7 +56,7 @@ class DataBatchManager:
         if not finish_data:
             print("no data in finish queue")
             for k, v in self.respond_store.items():
-                print(f"left key: {k}, value: {v}, len: {len(v)}")
+                print(f"left key: {k}, len: {len(v)}")
             time.sleep(1)
             return
         for data in finish_data:

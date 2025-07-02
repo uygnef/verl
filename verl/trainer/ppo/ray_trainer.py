@@ -852,10 +852,10 @@ class RayPPOTrainer:
         self.actor_rollout_wg = all_wg['actor_rollout']
         self.actor_rollout_wg.init_model(self.replay_buffer)
         master_address, master_port = self.actor_rollout_wg.get_master_addr_port()
-        self.actor_rollout_wg.test_rank()
         print(f"update weight group init for master {master_address}:{master_port}")
-        a = self.actor_rollout_wg.update_process_group(master_address, master_port)
-        self.rollout_wg.rollout_update_process_group(master_address, master_port, self.rollout_wg.rollout_group_size)
+        a = self.actor_rollout_wg.update_process_group(master_address, master_port,
+                                                       self.config.trainer.rollout.nnodes*self.config.trainer.n_gpus_per_node)
+        self.rollout_wg.rollout_update_process_group(master_address, master_port)
         ray.get(a)
         self.rollout_wg.set_extra_info()
 
@@ -875,7 +875,7 @@ class RayPPOTrainer:
         a =  ray.get(a)
 
     def _save_checkpoint(self):
-        # path: given_path + `/global_step_{global_steps}` + `/actor`
+        # path: given_path + `/global_step_{global_steps}` + `/actor`batch length should divide by sum of rate
         local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
 
         print(f"local_global_step_folder: {local_global_step_folder}")

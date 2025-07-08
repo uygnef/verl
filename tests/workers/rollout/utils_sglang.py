@@ -65,8 +65,9 @@ def initialize_global_process_group(timeout_second=36000, spmd=False):
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(local_rank)
-
     CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    print(f"local_rank: {local_rank}, rank {rank}, world_size: {world_size}, CUDA_VISIBLE_DEVICES {CUDA_VISIBLE_DEVICES}")
+
     if not CUDA_VISIBLE_DEVICES:
         if spmd:
             # CUDA_VISIBLE_DEVICES = ','.join(str(i) for i in range(tensor_parallel_size))

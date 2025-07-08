@@ -19,6 +19,7 @@ usage: torchrun --standalone --nnodes=1 \
 """
 
 import asyncio
+import time
 
 import torch
 from sglang.srt.entrypoints.engine import Engine
@@ -48,7 +49,7 @@ def test_sglang_spmd():
     max_prompt_length = 16
     max_response_length = 16
 
-    local_model_path = "Qwen/Qwen2.5-0.5B"
+    local_model_path = "/nfs/volume-1615-2/models/Qwen2.5-0.5B"
     tokenizer, actor_model = load_tokenizer_and_model(local_model_path)
 
     preencode_prompts = ["Who won the Champions League in 2019?", "The founder of Apple is", "What's your name?"]
@@ -91,8 +92,10 @@ def test_sglang_spmd():
         )
 
         loop = asyncio.get_event_loop()
+
         outputs = loop.run_until_complete(llm.async_generate(input_ids=idx_list, sampling_params=sampling_params))
     else:
+        time.sleep(1)
         outputs = None
 
     [outputs] = broadcast_pyobj(
@@ -111,3 +114,5 @@ def test_sglang_spmd():
 
     torch.distributed.barrier()
     torch.distributed.destroy_process_group()
+
+test_sglang_spmd()

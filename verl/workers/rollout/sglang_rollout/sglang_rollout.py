@@ -115,7 +115,7 @@ def get_tool_call_parser_type(tokenizer: PreTrainedTokenizer) -> str:
 
 
 class SGLangRollout(BaseRollout):
-    def __init__(
+    def     __init__(
         self,
         actor_module: str,
         config: DictConfig,

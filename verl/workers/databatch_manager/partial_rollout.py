@@ -6,7 +6,7 @@ from typing import List
 import numpy as np
 from tensordict import TensorDict
 
-from recipe.partial_rollout.replay_buffer import DistributedReplayBuffer
+from verl.utils.replay_buffer import DistributedReplayBuffer
 import ray
 import torch
 

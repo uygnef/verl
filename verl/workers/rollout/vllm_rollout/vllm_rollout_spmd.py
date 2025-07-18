@@ -30,7 +30,6 @@ import logging
 import os
 from contextlib import contextmanager
 from copy import deepcopy
-from pprint import pprint
 from typing import Any, Union
 from typing import Dict
 from typing import List
@@ -47,7 +46,7 @@ from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker_base import WorkerWrapperBase
 
-from recipe.partial_rollout.replay_buffer import DistributedReplayBuffer
+from verl.utils.replay_buffer import DistributedReplayBuffer
 from verl import DataProto
 from verl.third_party.vllm import vllm_version
 from verl.utils.debug import GPUMemoryLogger

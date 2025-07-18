@@ -20,7 +20,7 @@ from omegaconf import DictConfig
 from openai.types.chat.chat_completion import ChatCompletion
 from tensordict import TensorDict
 
-from recipe.partial_rollout.replay_buffer import DistributedReplayBuffer
+from verl.utils.replay_buffer import DistributedReplayBuffer
 from verl.protocol import DataProto
 from verl.workers.rollout.async_server import ChatCompletionScheduler
 import ray
